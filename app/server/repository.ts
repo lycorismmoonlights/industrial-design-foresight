@@ -100,6 +100,7 @@ function evidenceFromRow(row: Row): EvidenceDto {
     publishedAt: row.published_at ? String(row.published_at) : null,
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at),
+    links: [],
   };
 }
 
@@ -110,11 +111,19 @@ async function allRows(statement: D1PreparedStatement): Promise<Row[]> {
 
 export async function bootstrap(ownerId: string, user: BootstrapDto["user"]): Promise<BootstrapDto> {
   const db = getD1();
-  const [recordRows, sourceRows, inboxRows, evidenceRows, settingRows] = await Promise.all([
+  const initializedAt = now();
+  await db.batch([
+    db.prepare("INSERT OR IGNORE INTO settings (owner_id, key, value_json, updated_at) VALUES (?, 'timezone', ?, ?)").bind(ownerId, JSON.stringify("Asia/Shanghai"), initializedAt),
+    db.prepare("INSERT OR IGNORE INTO settings (owner_id, key, value_json, updated_at) VALUES (?, 'reviewCadence', ?, ?)").bind(ownerId, JSON.stringify("weekly"), initializedAt),
+    db.prepare("INSERT OR IGNORE INTO settings (owner_id, key, value_json, updated_at) VALUES (?, 'reviewDay', ?, ?)").bind(ownerId, JSON.stringify(0), initializedAt),
+    db.prepare("INSERT OR IGNORE INTO settings (owner_id, key, value_json, updated_at) VALUES (?, 'reviewMinutes', ?, ?)").bind(ownerId, JSON.stringify(30), initializedAt),
+  ]);
+  const [recordRows, sourceRows, inboxRows, evidenceRows, evidenceLinkRows, settingRows] = await Promise.all([
     allRows(db.prepare("SELECT * FROM records WHERE owner_id = ? ORDER BY updated_at DESC").bind(ownerId)),
     allRows(db.prepare("SELECT * FROM sources WHERE owner_id = ? ORDER BY name ASC").bind(ownerId)),
     allRows(db.prepare("SELECT * FROM inbox_items WHERE owner_id = ? ORDER BY created_at DESC LIMIT 200").bind(ownerId)),
     allRows(db.prepare("SELECT * FROM evidence WHERE owner_id = ? ORDER BY created_at DESC").bind(ownerId)),
+    allRows(db.prepare("SELECT link.evidence_id, link.record_id, link.relation FROM evidence_links AS link JOIN evidence AS evidence ON evidence.id = link.evidence_id WHERE evidence.owner_id = ?").bind(ownerId)),
     allRows(db.prepare("SELECT key, value_json FROM settings WHERE owner_id = ?").bind(ownerId)),
   ]);
   const inboxItems = inboxRows.map(inboxFromRow);
@@ -127,9 +136,34 @@ export async function bootstrap(ownerId: string, user: BootstrapDto["user"]): Pr
       reviewed: inboxItems.filter((item) => item.reviewStatus !== "pending").length,
     },
     inboxItems,
-    evidence: evidenceRows.map(evidenceFromRow),
+    evidence: evidenceRows.map((row) => ({
+      ...evidenceFromRow(row),
+      links: evidenceLinkRows.filter((link) => link.evidence_id === row.id).map((link) => ({
+        recordId: String(link.record_id),
+        relation: String(link.relation) as EvidenceDto["links"][number]["relation"],
+      })),
+    })),
     settings: Object.fromEntries(settingRows.map((row) => [String(row.key), parseJson(row.value_json, null)])),
   };
+}
+
+export async function updateSettings(ownerId: string, patch: Record<string, unknown>): Promise<Record<string, unknown>> {
+  const allowed = new Set(["timezone", "reviewCadence", "reviewDay", "reviewMinutes"]);
+  const entries = Object.entries(patch).filter(([key]) => allowed.has(key));
+  if (!entries.length) throw new AppError(400, "SETTINGS_PATCH_REQUIRED", "没有可更新的个人设置。");
+  if (patch.timezone !== undefined) {
+    if (typeof patch.timezone !== "string") throw new AppError(400, "INVALID_TIMEZONE", "时区必须是 IANA 时区名称。");
+    try { new Intl.DateTimeFormat("zh-CN", { timeZone: patch.timezone }).format(); } catch { throw new AppError(400, "INVALID_TIMEZONE", "时区必须是有效的 IANA 时区名称。"); }
+  }
+  if (patch.reviewCadence !== undefined && patch.reviewCadence !== "weekly") throw new AppError(400, "INVALID_REVIEW_CADENCE", "v0.2 仅支持每周复盘节奏。");
+  if (patch.reviewDay !== undefined && (!Number.isInteger(patch.reviewDay) || Number(patch.reviewDay) < 0 || Number(patch.reviewDay) > 6)) throw new AppError(400, "INVALID_REVIEW_DAY", "复盘日必须在 0–6 之间。");
+  if (patch.reviewMinutes !== undefined && (!Number.isInteger(patch.reviewMinutes) || Number(patch.reviewMinutes) < 15 || Number(patch.reviewMinutes) > 120)) throw new AppError(400, "INVALID_REVIEW_MINUTES", "复盘时长必须在 15–120 分钟之间。");
+  const timestamp = now();
+  const db = getD1();
+  await db.batch(entries.map(([key, value]) => db.prepare("INSERT INTO settings (owner_id, key, value_json, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT(owner_id, key) DO UPDATE SET value_json = excluded.value_json, updated_at = excluded.updated_at")
+    .bind(ownerId, key, JSON.stringify(value), timestamp)));
+  const rows = await allRows(db.prepare("SELECT key, value_json FROM settings WHERE owner_id = ?").bind(ownerId));
+  return Object.fromEntries(rows.map((row) => [String(row.key), parseJson(row.value_json, null)]));
 }
 
 export async function createRecord(ownerId: string, actorEmail: string, input: {
@@ -193,8 +227,19 @@ export async function updateRecord(ownerId: string, actorEmail: string, id: stri
   if (hypothesisReasonRequired(current, patch as Partial<RecordDto>) && !changeReason?.trim()) {
     throw new AppError(400, "CHANGE_REASON_REQUIRED", "修改假设、置信度或证伪条件时必须填写变更理由。");
   }
+  const nextStatus = patch.status ?? current.status;
+  if (current.kind === "signal" && current.status !== "published" && nextStatus === "published") {
+    const nextPayload = patch.payload ?? current.payload;
+    const allowedQuadrants = new Set(["需求与商业", "技术与工具", "制造与材料", "社会与规则"]);
+    if (!allowedQuadrants.has(String(nextPayload.quadrant ?? ""))) {
+      throw new AppError(400, "SIGNAL_QUADRANT_REQUIRED", "发布信号前必须选择有效象限。");
+    }
+    const link = await getD1().prepare("SELECT 1 AS linked FROM evidence_links AS link JOIN evidence AS evidence ON evidence.id = link.evidence_id WHERE link.record_id = ? AND evidence.owner_id = ? LIMIT 1")
+      .bind(id, ownerId).first<Row>();
+    if (!link) throw new AppError(400, "SIGNAL_EVIDENCE_REQUIRED", "发布信号前必须至少关联一条证据。");
+  }
   const timestamp = now();
-  const status = patch.status ?? current.status;
+  const status = nextStatus;
   const next: RecordDto = {
     ...current,
     status,

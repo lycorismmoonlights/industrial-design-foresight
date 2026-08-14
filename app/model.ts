@@ -5,6 +5,10 @@ export type ViewId =
   | "skills"
   | "opportunities"
   | "discussions"
+  | "weekly"
+  | "sources"
+  | "inbox"
+  | "evidence"
   | "data";
 
 export type RadarRing = "关注" | "研究" | "试验" | "行动";

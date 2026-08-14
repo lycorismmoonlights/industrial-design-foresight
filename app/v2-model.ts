@@ -72,6 +72,7 @@ export interface EvidenceDto {
   publishedAt: string | null;
   createdAt: string;
   updatedAt: string;
+  links: Array<{ recordId: string; relation: "supports" | "opposes" | "context" }>;
 }
 
 export interface BootstrapDto {
@@ -119,7 +120,7 @@ export function recordsToV1(records: RecordDto[]): ResearchStore {
     discussions: [],
   };
 
-  for (const record of records.filter((item) => !item.deletedAt && item.status !== "archived")) {
+  for (const record of records.filter((item) => !item.deletedAt && item.status === "published")) {
     const collection = V1_COLLECTIONS[record.kind];
     const legacy = { ...record.payload, id: record.id };
     (store[collection] as unknown as Array<Record<string, unknown>>).push(legacy);

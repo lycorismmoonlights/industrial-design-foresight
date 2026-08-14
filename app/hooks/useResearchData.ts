@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { ResearchStore } from "../model";
 import { apiRequest } from "../data/api-client";
-import { recordsToV1, titleForV1, type BootstrapDto, type RecordDto, type RecordKind, type RecordStatus, type RevisionDto } from "../v2-model";
+import { recordsToV1, titleForV1, type BootstrapDto, type EvidenceDto, type RecordDto, type RecordKind, type RecordStatus, type RevisionDto, type SourceDto } from "../v2-model";
 
 const EMPTY_STORE: ResearchStore = {
   version: 1,
@@ -83,7 +83,7 @@ export function useResearchData(initialUser: InitialUser) {
       method: "POST",
       body: JSON.stringify({
         kind,
-        status: options?.status ?? "published",
+        status: options?.status ?? (kind === "signal" ? "draft" : "published"),
         title: titleForV1(kind, value),
         summary: summaryFor(kind, value),
         payload,
@@ -158,6 +158,52 @@ export function useResearchData(initialUser: InitialUser) {
     return apiRequest<Record<string, unknown>>("/api/export");
   }
 
+  async function createSource(input: {
+    name: string; pageUrl?: string | null; feedUrl?: string | null; sourceCategory?: string;
+    defaultCredibility?: number; enabled?: boolean; confirmEnable?: boolean;
+  }) {
+    const source = await apiRequest<SourceDto>("/api/sources", { method: "POST", body: JSON.stringify(input) });
+    await refresh();
+    return source;
+  }
+
+  async function updateSource(id: string, patch: Partial<Pick<SourceDto, "name" | "pageUrl" | "feedUrl" | "sourceCategory" | "defaultCredibility" | "enabled">>, confirmEnable = false) {
+    const source = await apiRequest<SourceDto>("/api/sources", { method: "PATCH", body: JSON.stringify({ id, patch, confirmEnable }) });
+    await refresh();
+    return source;
+  }
+
+  async function fetchSource(id: string) {
+    const result = await apiRequest<{ sourceId: string; status: string; newCount: number; durationMs: number }>(`/api/sources/${encodeURIComponent(id)}/fetch`, { method: "POST" });
+    await refresh();
+    return result;
+  }
+
+  async function reviewInbox(id: string, input: {
+    action: "reject" | "ignore" | "convert"; sourceCategory?: string; credibility?: number;
+    relevance?: number; stance?: EvidenceDto["stance"]; note?: string;
+  }) {
+    const result = await apiRequest<{ recordId: string | null; evidenceId: string | null }>(`/api/inbox/${encodeURIComponent(id)}/review`, { method: "POST", body: JSON.stringify(input) });
+    await refresh();
+    return result;
+  }
+
+  async function createEvidence(input: {
+    title: string; url?: string | null; sourceName: string; sourceCategory: string;
+    credibility: number; relevance: number; stance: EvidenceDto["stance"];
+    note?: string; publishedAt?: string | null; recordId?: string | null;
+  }) {
+    const evidence = await apiRequest<EvidenceDto>("/api/evidence", { method: "POST", body: JSON.stringify(input) });
+    await refresh();
+    return evidence;
+  }
+
+  async function updateSettings(patch: Record<string, unknown>) {
+    const settings = await apiRequest<Record<string, unknown>>("/api/settings", { method: "PATCH", body: JSON.stringify(patch) });
+    setData((current) => current ? { ...current, settings } : current);
+    return settings;
+  }
+
   return {
     data: data ?? { user: initialUser, records: [], sources: [], inboxStats: { pending: 0, reviewed: 0 }, inboxItems: [], evidence: [], settings: {} },
     records,
@@ -174,5 +220,11 @@ export function useResearchData(initialUser: InitialUser) {
     revisions,
     importV1,
     exportV2,
+    createSource,
+    updateSource,
+    fetchSource,
+    reviewInbox,
+    createEvidence,
+    updateSettings,
   };
 }

@@ -10,12 +10,15 @@
     "build": "vinext build",
     "start": "vinext start",
     "test": "vitest run",
+    "test:browser": "playwright test",
     "typecheck": "tsc --noEmit",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
-    "db:generate": "drizzle-kit generate"
+    "db:generate": "drizzle-kit generate",
+    "db:migrate:local": "wrangler d1 migrations apply site-creator-d1 --local --persist-to=.wrangler/state --config=wrangler.local.jsonc"
   },
   "dependencies": {
     "drizzle-orm": "0.45.2",
+    "fast-xml-parser": "^5.10.1",
     "lucide-react": "0.468.0",
     "react": "19.2.6",
     "react-dom": "19.2.6"
@@ -26,6 +29,7 @@
     "@cloudflare/workers-types": "5.20260812.1",
     "@eslint/js": "9.39.4",
     "@next/eslint-plugin-next": "16.2.6",
+    "@playwright/test": "^1.62.1",
     "@tailwindcss/postcss": "4.2.1",
     "@types/node": "22.19.19",
     "@types/react": "19.2.14",
