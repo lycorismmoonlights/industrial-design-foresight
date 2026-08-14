@@ -22,3 +22,6 @@ jobs:
       - run: pnpm run lint
       - run: pnpm run test
       - run: pnpm run build
+      - run: pnpm exec playwright install --with-deps chromium
+      - run: pnpm run db:migrate:local
+      - run: pnpm run test:browser
