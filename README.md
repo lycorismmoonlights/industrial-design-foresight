@@ -1,93 +1,62 @@
-# 工业设计前瞻站 · 测试版
+# 工业设计前瞻站 · v0.2 私有研究版
 
-面向工业设计学生与从业者的本地研究系统，用于行业前瞻、知识技能储备、危机阶段推演，以及危机后的机会研究。
+面向工业设计学生与从业者的个人研究系统，用于行业前瞻、知识技能储备、危机阶段推演，以及危机后的机会研究。
 
-核心研究情景是：AI 行业可能在 2029 年左右发生泡沫破裂，工业设计相关机会可能在 6–12 个月内进入恢复窗口。系统把它明确作为“待验证假设”，而不是确定结论。
+核心研究情景仍是可证伪假设：AI 行业可能在 2029 年左右出现泡沫破裂，工业设计相关机会可能在危机后 6–12 个月内进入恢复窗口。系统不会把它当作确定结论。
 
-## 已实现功能
+## v0.2 能力
 
-- 研究总览：行业信号、假设、技能缺口、机会准备度和当前危机阶段
-- 行业雷达：四象限、四行动环、移动方向、来源和可信度
-- 2029 预测：两项核心假设、支持/反方证据、证伪条件、五种情景预设
-- 危机计算：六项可手动校准指标，自动给出 P0–P4 阶段和行动建议
-- 技能库：L0–L4 能力等级、目标、优先级、验证证据和下一动作
-- 机会库：现在/危机期/复苏窗口，进入触发器与综合评分
-- 讨论区：研究问题、反方证据、行动提案、复盘，以及讨论转决策
-- 数据维护：浏览器自动保存、JSON 导入导出、恢复演示数据
-- 响应式布局：桌面、平板和手机演示
+- D1 是唯一业务数据源；`localStorage` 仅保存当前视图等界面偏好。
+- ChatGPT 登录与服务端 `OWNER_EMAIL` 白名单共同限制唯一所有者。
+- 信号、指标、假设、技能、机会和讨论使用统一记录模型。
+- 新增、编辑、归档、软删除、恢复与完整修订历史。
+- `expectedRevision` 乐观锁；版本冲突返回 `409`。
+- 修改假设、置信度或证伪条件时必须填写理由。
+- v1 JSON 导入向导按文件 SHA-256 拒绝重复导入。
+- v2 完整 JSON 导出，用于迁移前手动备份。
+- Workers Vitest 在隔离 D1 中实际应用 Drizzle 迁移。
 
-## 本地启动
+订阅来源、待审核箱、证据关联、Cron 与每周研究面板在第二功能分支实现。
 
-本项目要求 Node.js 22.13 或更高版本。
+## 本地运行
+
+要求 Node.js 22.13+ 与 pnpm 11。
 
 ```powershell
+Copy-Item .env.example .env.local
+# 编辑 .env.local，把 OWNER_EMAIL 改成用于本地请求的登录邮箱
 pnpm install
 pnpm run dev
 ```
 
-打开终端显示的地址，默认是 `http://localhost:3000`。当前工作区验证服务器使用 `http://localhost:4173`。
+首次启动前，D1 迁移位于 `drizzle/`。托管环境由 Sites 根据 `.openai/hosting.json` 创建并绑定 `DB`。
 
-生产构建：
+## 检查
 
 ```powershell
+pnpm run typecheck
+pnpm run lint
+pnpm run test
 pnpm run build
 ```
 
-完整检查：
+`pnpm run test` 使用 Cloudflare Workers Vitest 集成，并在 workerd 内应用实际迁移后测试 CRUD、软删除恢复、版本冲突、假设变更理由与 v1 导入。
 
-```powershell
-pnpm exec tsc --noEmit
-pnpm run lint
-pnpm run test
-```
+## 关键结构
 
-## 5 分钟演示脚本
+- `app/components/ForesightApp.tsx`：研究视图与交互界面
+- `app/hooks/useResearchData.ts`：客户端云端数据状态
+- `app/data/api-client.ts`：统一 API 客户端
+- `app/server/repository.ts`：D1 数据服务与并发控制
+- `app/server/auth.ts`：所有者身份校验
+- `app/api/`：v2 API 路由
+- `db/schema.ts`：Drizzle/D1 Schema
+- `drizzle/`：纳入版本管理的 SQL 迁移
+- `tests/records.test.ts`：Workers/D1 集成测试
 
-1. 在“研究总览”说明 2029 与 6–12 个月是压力测试情景，不是已证实事实。
-2. 打开“行业雷达”，按象限或行动环筛选信号，并查看来源、可信度和移动方向。
-3. 打开“2029 预测”，依次选择“基准准备”“断裂冲击”“低谷压缩”“复苏窗口”，观察 P0–P4 行动建议变化。
-4. 在“技能库”提高一个技能等级，展示能力证据和下一动作。
-5. 在“机会库”修改状态，说明趋势必须经过触发器和最小验证才能成为机会。
-6. 在“讨论与决策”新建一项反方证据或行动提案，再点击“转为决策”。
-7. 刷新页面验证本地保存；最后在“数据与备份”导出 JSON。
+## 安全与数据边界
 
-## 数据边界
-
-- 测试版不连接账号、云端数据库或第三方服务。
-- 数据保存在当前浏览器的 `localStorage`，清理浏览器站点数据会删除本地修改。
-- 重要修改请从“数据与备份”导出 JSON。
-- 演示数据不等于实时行业监测，来源条目也需在正式研究中按日期复核。
-
-## 技术结构
-
-- Vinext / React 19 / TypeScript
-- Tailwind CSS 入口 + 项目自定义 CSS
-- Lucide 图标
-- 统一 `ResearchStore` 数据结构
-- 纯函数危机阶段计算与机会评分
-- 本地 JSON 版本校验、导入导出和浏览器持久化
-
-关键文件：
-
-- `app/components/ForesightApp.tsx`：全部视图和交互闭环
-- `app/model.ts`：数据类型、阶段算法、导入校验
-- `app/demo-data.ts`：演示数据和五种情景预设
-- `app/globals.css`：视觉系统和响应式布局
-- `tests/rendered-html.test.mjs`：服务器渲染和核心边界测试
-
-## 成熟模式参考与取舍
-
-- [Thoughtworks Technology Radar](https://www.thoughtworks.com/radar)：采用象限、行动环和移动结构；不照搬企业级编辑流程。
-- [Build Your Own Radar](https://github.com/thoughtworks/build-your-own-radar)：参考结构化 JSON 输入；本项目增加证据、可信度和工业设计行动字段。
-- [GitHub Discussions](https://docs.github.com/en/discussions)：采用分类讨论和决定沉淀；测试版不实现账号、权限和多人同步。
-- [Obsidian Bases](https://help.obsidian.md/bases)：采用属性化记录、筛选和本地优先；用通用 JSON 保障迁移。
-
-## 下一阶段接口
-
-测试版验证研究流程后，再按顺序推进：
-
-1. 把 `localStorage` 替换为本地 SQLite 或共享 PostgreSQL，保持 `ResearchStore` 字段兼容。
-2. 增加来源抓取队列、引用快照、重复检测和证据质量评分。
-3. 增加账号、角色、评论回复、决策审批和变更历史。
-4. 增加季度报告生成、雷达版本对比和技能/机会联动推荐。
-5. 最后再考虑公开部署与社区推广，避免在研究方法未稳定前扩大系统复杂度。
+- `OWNER_EMAIL` 和平台凭据只在本地忽略文件或 Sites 运行时设置，不写入 Git。
+- 生产库默认为空；可选择导入 v1 备份或示例数据。
+- 正式迁移前先记录 D1 Time Travel bookmark，并导出一份 v2 JSON。
+- 订阅只负责发现资料；正式行业信号必须人工审核。

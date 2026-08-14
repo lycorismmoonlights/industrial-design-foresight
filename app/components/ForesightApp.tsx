@@ -14,10 +14,9 @@ import {
   Download,
   ExternalLink,
   Filter,
-  FolderKanban,
   Gauge,
   GraduationCap,
-  HardDriveDownload,
+  History,
   LayoutDashboard,
   Menu,
   MessageSquareText,
@@ -34,11 +33,9 @@ import {
 } from "lucide-react";
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { demoStore, scenarioPresets } from "../demo-data";
+import { useResearchData, type InitialUser } from "../hooks/useResearchData";
 import {
-  STORAGE_KEY,
   calculatePhase,
-  isResearchStore,
-  makeId,
   phaseMeta,
   scoreOpportunity,
   type CrisisPhase,
@@ -52,6 +49,7 @@ import {
   type Skill,
   type ViewId,
 } from "../model";
+import type { RecordDto, RevisionDto } from "../v2-model";
 
 type ModalType = "signal" | "skill" | "opportunity" | "discussion" | null;
 
@@ -72,19 +70,11 @@ const VIEW_COPY: Record<ViewId, { eyebrow: string; title: string; description: s
   skills: { eyebrow: "可迁移能力", title: "技能储备库", description: "用可验证成果而不是“学过”管理技能，优先补齐危机中仍有价值的能力。" },
   opportunities: { eyebrow: "进入准备", title: "机会窗口库", description: "分别管理现在、危机期和复苏窗口的进入条件，避免把趋势等同于机会。" },
   discussions: { eyebrow: "研究协作", title: "讨论与决策", description: "区分开放讨论、反方证据和正式决定，让研究过程可追溯。" },
-  data: { eyebrow: "本地优先", title: "数据与备份", description: "测试版数据保存在当前浏览器；JSON 导入导出保证可迁移和可恢复。" },
+  data: { eyebrow: "云端数据", title: "记录、历史与备份", description: "D1 保存全部研究记录与版本；浏览器只保留界面偏好。" },
 };
 
 const RINGS: RadarRing[] = ["行动", "试验", "研究", "关注"];
 const QUADRANTS: RadarQuadrant[] = ["需求与商业", "技术与工具", "制造与材料", "社会与规则"];
-
-function deepCloneDemo(): ResearchStore {
-  return JSON.parse(JSON.stringify(demoStore)) as ResearchStore;
-}
-
-function updateTimestamp(store: ResearchStore): ResearchStore {
-  return { ...store, updatedAt: new Date().toISOString() };
-}
 
 function formatDate(value: string) {
   return new Intl.DateTimeFormat("zh-CN", { month: "2-digit", day: "2-digit" }).format(new Date(value));
@@ -109,38 +99,27 @@ function confidenceTone(value: number) {
   return "muted";
 }
 
-export function ForesightApp() {
-  const [store, setStore] = useState<ResearchStore>(() => deepCloneDemo());
+export function ForesightApp({ initialUser }: { initialUser: InitialUser }) {
+  const research = useResearchData(initialUser);
+  const { store } = research;
   const [activeView, setActiveView] = useState<ViewId>("dashboard");
   const [query, setQuery] = useState("");
-  const [hydrated, setHydrated] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [modalType, setModalType] = useState<ModalType>(null);
   const [notice, setNotice] = useState("");
-  const [resetOpen, setResetOpen] = useState(false);
   const importRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
+    const savedView = window.localStorage.getItem("id-foresight-ui-view") as ViewId | null;
     const timer = window.setTimeout(() => {
-      try {
-        const saved = window.localStorage.getItem(STORAGE_KEY);
-        if (saved) {
-          const parsed: unknown = JSON.parse(saved);
-          if (isResearchStore(parsed)) setStore(parsed);
-        }
-      } catch {
-        setNotice("本地数据读取失败，已载入演示数据。可在“数据与备份”中重新导入。");
-      } finally {
-        setHydrated(true);
-      }
+      if (savedView && NAV.some((item) => item.id === savedView)) setActiveView(savedView);
     }, 0);
     return () => window.clearTimeout(timer);
   }, []);
 
   useEffect(() => {
-    if (!hydrated) return;
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(store));
-  }, [store, hydrated]);
+    window.localStorage.setItem("id-foresight-ui-view", activeView);
+  }, [activeView]);
 
   useEffect(() => {
     if (!notice) return;
@@ -155,9 +134,13 @@ export function ForesightApp() {
     return store.signals.filter((item) => [item.title, item.summary, item.sourceName, ...item.tags].join(" ").toLowerCase().includes(needle));
   }, [query, store.signals]);
 
-  function commit(updater: (current: ResearchStore) => ResearchStore, message?: string) {
-    setStore((current) => updateTimestamp(updater(current)));
-    if (message) setNotice(message);
+  async function run(action: () => Promise<unknown>, success: string) {
+    try {
+      await action();
+      setNotice(success);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "操作失败，请重试。");
+    }
   }
 
   function navigate(view: ViewId) {
@@ -166,76 +149,72 @@ export function ForesightApp() {
   }
 
   function updateIndicator(id: string, patch: Partial<Indicator>) {
-    commit((current) => ({ ...current, indicators: current.indicators.map((item) => (item.id === id ? { ...item, ...patch } : item)) }));
+    void run(() => research.patchLegacy("indicator", id, patch as Record<string, unknown>), "指标已保存");
   }
 
   function applyScenario(key: keyof typeof scenarioPresets) {
     const preset = scenarioPresets[key];
-    commit(
-      (current) => ({
-        ...current,
-        indicators: current.indicators.map((item, index) => ({
-          ...item,
-          value: preset.values[index] as Indicator["value"],
-          direction: preset.directions[index] as Indicator["direction"],
-        })),
-      }),
-      `已载入“${preset.label}”演示情景`,
+    void run(
+      () => Promise.all(store.indicators.map((item, index) => research.patchLegacy("indicator", item.id, {
+        value: preset.values[index] as Indicator["value"],
+        direction: preset.directions[index] as Indicator["direction"],
+      }))),
+      `已载入“${preset.label}”情景`,
     );
   }
 
   function updateSkill(id: string, level: Skill["level"]) {
-    commit((current) => ({ ...current, skills: current.skills.map((item) => (item.id === id ? { ...item, level } : item)) }), "技能进度已保存");
+    void run(() => research.patchLegacy("skill", id, { level }), "技能进度已保存");
   }
 
   function updateOpportunity(id: string, status: Opportunity["status"]) {
-    commit((current) => ({ ...current, opportunities: current.opportunities.map((item) => (item.id === id ? { ...item, status } : item)) }), "机会状态已更新");
+    void run(() => research.patchLegacy("opportunity", id, { status }), "机会状态已更新");
   }
 
   function convertDecision(id: string) {
-    commit(
-      (current) => ({
-        ...current,
-        discussions: current.discussions.map((item) =>
-          item.id === id
-            ? { ...item, status: "已形成决策", decision: `采纳方向：${item.title}。下一轮研究按提案补充证据并复盘。` }
-            : item,
-        ),
-      }),
-      "讨论已转为可追溯决策",
-    );
+    const item = store.discussions.find((discussion) => discussion.id === id);
+    if (!item) return;
+    void run(() => research.patchLegacy("discussion", id, {
+      status: "已形成决策",
+      decision: `采纳方向：${item.title}。下一轮研究按提案补充证据并复盘。`,
+    }), "讨论已转为可追溯决策");
   }
 
-  function exportData() {
-    const blob = new Blob([JSON.stringify(store, null, 2)], { type: "application/json;charset=utf-8" });
+  async function exportData() {
+    const backup = await research.exportV2();
+    const blob = new Blob([JSON.stringify(backup, null, 2)], { type: "application/json;charset=utf-8" });
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.href = url;
     link.download = `工业设计前瞻研究备份-${new Date().toISOString().slice(0, 10)}.json`;
     link.click();
     URL.revokeObjectURL(url);
-    setNotice("JSON 备份已导出");
+    setNotice("v2 完整 JSON 备份已导出");
   }
 
   async function importData(event: React.ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
     if (!file) return;
     try {
-      const parsed: unknown = JSON.parse(await file.text());
-      if (!isResearchStore(parsed)) throw new Error("invalid");
-      setStore(updateTimestamp(parsed));
-      setNotice("数据导入成功");
-    } catch {
-      setNotice("导入失败：文件不是本系统 v1 JSON 备份");
+      const result = await research.importV1(await file.text());
+      setNotice(`v1 导入成功：${Object.values(result.counts).reduce((sum, count) => sum + count, 0)} 条记录`);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "导入失败：文件不是 v1 JSON 备份");
     } finally {
       event.target.value = "";
     }
   }
 
-  function resetDemo() {
-    setStore(deepCloneDemo());
-    setResetOpen(false);
-    setNotice("已恢复初始演示数据");
+  async function importExample() {
+    await run(() => research.importV1(JSON.stringify(demoStore)), "示例研究数据已导入");
+  }
+
+  async function createRecord(kind: Exclude<ModalType, null>, value: Record<string, unknown>) {
+    await run(() => research.createLegacy(kind, value), "记录已保存到云端");
+  }
+
+  if (research.loading && !research.records.length) {
+    return <main className="loading-page"><Radar size={28} /><p>正在连接私有研究库…</p></main>;
   }
 
   const page = VIEW_COPY[activeView];
@@ -263,8 +242,8 @@ export function ForesightApp() {
           })}
         </nav>
         <div className="sidebar-bottom">
-          <div className="local-status"><ShieldCheck size={16} /><div><strong>本地测试模式</strong><span>数据仅保存在当前浏览器</span></div></div>
-          <div className="version-line"><span>DEMO v0.1</span><span>{hydrated ? "已自动保存" : "正在载入"}</span></div>
+          <div className="local-status"><ShieldCheck size={16} /><div><strong>私有云端模式</strong><span>{research.data.user.email}</span></div></div>
+          <div className="version-line"><span>PERSONAL v0.2</span><a href="/signout-with-chatgpt?return_to=/">退出</a></div>
         </div>
       </aside>
 
@@ -283,8 +262,11 @@ export function ForesightApp() {
         <div className="page-wrap">
           <div className="page-heading">
             <div><p className="eyebrow">{page.eyebrow}</p><h1>{page.title}</h1><p>{page.description}</p></div>
-            <div className="heading-meta"><span><Clock3 size={14} />更新 {formatDate(store.updatedAt)}</span><span className="demo-badge">演示数据 · 非实时监测</span></div>
+            <div className="heading-meta"><span><Clock3 size={14} />{research.records.length ? `更新 ${formatDate(store.updatedAt)}` : "尚无研究记录"}</span><span className="demo-badge">人工审核 · 云端可追溯</span></div>
           </div>
+
+          {research.error && <div className="inline-error">{research.error}<button onClick={() => void research.refresh()}>重试</button></div>}
+          {!research.records.length && activeView !== "data" && <section className="empty-cloud"><Database size={24} /><div><h2>研究库目前为空</h2><p>导入旧版备份或示例数据后，即可继续使用雷达、预测、技能和机会功能。</p></div><button className="button secondary" onClick={() => navigate("data")}>前往导入</button></section>}
 
           {activeView === "dashboard" && (
             <DashboardView store={store} phase={phase} signals={searchSignals} navigate={navigate} applyScenario={applyScenario} />
@@ -297,22 +279,13 @@ export function ForesightApp() {
           {activeView === "opportunities" && <OpportunityView opportunities={store.opportunities} updateStatus={updateOpportunity} openAdd={() => setModalType("opportunity")} />}
           {activeView === "discussions" && <DiscussionView discussions={store.discussions} convertDecision={convertDecision} openAdd={() => setModalType("discussion")} />}
           {activeView === "data" && (
-            <DataView store={store} exportData={exportData} importData={() => importRef.current?.click()} resetData={() => setResetOpen(true)} />
+            <DataView store={store} records={research.records} exportData={() => void exportData()} importData={() => importRef.current?.click()} importExample={() => void importExample()} archive={(record) => void run(() => research.setStatus(record, "archived"), "记录已归档")} restore={(record) => void run(() => record.deletedAt ? research.restore(record) : research.setStatus(record, "published"), "记录已恢复")} remove={(record) => void run(() => research.softDelete(record), "记录已移入回收站")} revisions={research.revisions} update={(record, patch, reason) => research.updateRecord(record, patch, reason)} />
           )}
         </div>
       </main>
 
       <input ref={importRef} className="visually-hidden" type="file" accept="application/json,.json" onChange={importData} />
-      {modalType && <AddRecordModal type={modalType} close={() => setModalType(null)} commit={commit} changeType={setModalType} />}
-      {resetOpen && (
-        <div className="modal-backdrop">
-          <section className="confirm-card" role="dialog" aria-modal="true" aria-label="恢复演示数据">
-            <div className="confirm-icon"><RefreshCcw size={22} /></div><h2>恢复初始演示数据？</h2>
-            <p>当前浏览器中的修改会被覆盖。若需要保留，请先导出 JSON 备份。</p>
-            <div className="modal-actions"><button className="button ghost" onClick={() => setResetOpen(false)}>取消</button><button className="button danger" onClick={resetDemo}>确认恢复</button></div>
-          </section>
-        </div>
-      )}
+      {modalType && <AddRecordModal type={modalType} close={() => setModalType(null)} create={createRecord} changeType={setModalType} />}
       {notice && <div className="toast" role="status"><Check size={16} />{notice}</div>}
     </div>
   );
@@ -494,42 +467,81 @@ function DiscussionView({ discussions, convertDecision, openAdd }: { discussions
   </div>;
 }
 
-function DataView({ store, exportData, importData, resetData }: { store: ResearchStore; exportData: () => void; importData: () => void; resetData: () => void }) {
+function DataView({ store, records, exportData, importData, importExample, archive, restore, remove, revisions, update }: {
+  store: ResearchStore;
+  records: RecordDto[];
+  exportData: () => void;
+  importData: () => void;
+  importExample: () => void;
+  archive: (record: RecordDto) => void;
+  restore: (record: RecordDto) => void;
+  remove: (record: RecordDto) => void;
+  revisions: (id: string) => Promise<RevisionDto[]>;
+  update: (record: RecordDto, patch: { title: string; summary: string; payload: Record<string, unknown> }, reason?: string) => Promise<RecordDto>;
+}) {
+  const [editing, setEditing] = useState<RecordDto | null>(null);
+  const [historyFor, setHistoryFor] = useState<RecordDto | null>(null);
+  const [history, setHistory] = useState<RevisionDto[]>([]);
   const collections = [
     ["行业信号", store.signals.length, Radar], ["预测假设", store.hypotheses.length, BrainCircuit], ["技能记录", store.skills.length, GraduationCap], ["机会条目", store.opportunities.length, Target], ["讨论/决策", store.discussions.length, MessageSquareText],
   ] as const;
+  async function openHistory(record: RecordDto) {
+    setHistoryFor(record);
+    setHistory(await revisions(record.id));
+  }
   return <div className="view-stack">
-    <section className="data-hero"><div><HardDriveDownload size={24} /><h2>本地数据工作区</h2><p>无需账号、无需网络即可演示。每次修改自动保存到浏览器；正式推进前可平滑迁移到共享数据库。</p></div><span><ShieldCheck size={16} />LOCAL FIRST</span></section>
+    <section className="data-hero"><div><Database size={24} /><h2>D1 私有研究库</h2><p>业务数据跨设备保存；每次变更都形成完整快照，并以版本号阻止静默覆盖。</p></div><span><ShieldCheck size={16} />OWNER ONLY</span></section>
     <section className="collection-grid">{collections.map(([label, count, Icon]) => <div className="collection-card" key={label}><Icon size={18} /><span>{label}</span><strong>{count}</strong></div>)}</section>
     <section className="two-column equal">
-      <div className="panel data-actions"><PanelTitle eyebrow="迁移与恢复" title="JSON 备份" /><button onClick={exportData}><span className="data-action-icon"><Download size={20} /></span><div><strong>导出完整备份</strong><p>包含信号、指标、假设、技能、机会和讨论。</p></div><ChevronRight size={18} /></button><button onClick={importData}><span className="data-action-icon"><Upload size={20} /></span><div><strong>导入 v1 备份</strong><p>校验结构后覆盖当前浏览器中的工作数据。</p></div><ChevronRight size={18} /></button><button className="reset-action" onClick={resetData}><span className="data-action-icon"><RefreshCcw size={20} /></span><div><strong>恢复演示数据</strong><p>用于课堂演示或重新测试完整流程。</p></div><ChevronRight size={18} /></button></div>
-      <div className="panel reference-panel"><PanelTitle eyebrow="设计参考" title="成熟模式的取舍" /><div className="reference-list"><a href="https://www.thoughtworks.com/radar" target="_blank" rel="noreferrer"><span><Radar size={18} /></span><div><strong>Thoughtworks Technology Radar</strong><p>复用象限、行动环和移动；不照搬复杂编辑流程。</p></div><ExternalLink size={15} /></a><a href="https://docs.github.com/en/discussions" target="_blank" rel="noreferrer"><span><MessageSquareText size={18} /></span><div><strong>GitHub Discussions</strong><p>复用分类讨论与决策沉淀；测试版不做账号和权限。</p></div><ExternalLink size={15} /></a><a href="https://help.obsidian.md/bases" target="_blank" rel="noreferrer"><span><FolderKanban size={18} /></span><div><strong>Obsidian Bases</strong><p>复用属性化记录、筛选和本地优先；数据用通用 JSON 迁移。</p></div><ExternalLink size={15} /></a></div></div>
+      <div className="panel data-actions"><PanelTitle eyebrow="迁移与恢复" title="JSON 备份" /><button onClick={exportData}><span className="data-action-icon"><Download size={20} /></span><div><strong>导出 v2 完整备份</strong><p>包含业务数据、来源、证据、修订和设置。</p></div><ChevronRight size={18} /></button><button onClick={importData}><span className="data-action-icon"><Upload size={20} /></span><div><strong>导入 v1 备份</strong><p>六类记录转成服务端 UUID；同一文件只允许导入一次。</p></div><ChevronRight size={18} /></button><button className="reset-action" onClick={importExample}><span className="data-action-icon"><RefreshCcw size={20} /></span><div><strong>导入示例研究</strong><p>仅供首次体验；不会覆盖已有数据。</p></div><ChevronRight size={18} /></button></div>
+      <div className="panel reference-panel"><PanelTitle eyebrow="可靠性" title="数据保护机制" /><div className="reliability-list"><p><ShieldCheck size={17} /><span><strong>唯一所有者</strong> 页面与 API 同时校验登录邮箱。</span></p><p><History size={17} /><span><strong>完整修订</strong> 每次修改、归档、删除与恢复均留存快照。</span></p><p><RefreshCcw size={17} /><span><strong>冲突保护</strong> expectedRevision 不一致时返回 409。</span></p></div></div>
     </section>
-    <section className="panel schema-panel"><PanelTitle eyebrow="可推广基础" title="统一数据结构" /><div className="schema-flow"><span>来源 / 观察</span><ArrowRight size={16} /><span>结构化信号</span><ArrowRight size={16} /><span>假设与指标</span><ArrowRight size={16} /><span>技能 / 机会动作</span><ArrowRight size={16} /><span>讨论与决策</span></div><p>每个对象都有稳定 ID、时间、状态和可追溯字段。未来接入数据库时，无需重做研究方法，只替换存储与协作层。</p></section>
+    <section className="panel record-admin"><PanelTitle eyebrow="统一记录" title="编辑、归档与历史" />{records.length === 0 ? <p className="empty-note">还没有记录。先导入备份、示例数据或新建一条信号。</p> : <div className="record-table">{records.map((record) => <article key={record.id} className={record.deletedAt ? "is-deleted" : ""}><div><span className="record-kind">{record.kind}</span><strong>{record.title}</strong><small>v{record.revision} · {record.deletedAt ? "回收站" : record.status}</small></div><div className="record-actions"><button onClick={() => void openHistory(record)}><History size={14} />历史</button>{!record.deletedAt && <button onClick={() => setEditing(record)}>编辑</button>}{!record.deletedAt && record.status !== "archived" && <button onClick={() => archive(record)}>归档</button>}{(record.deletedAt || record.status === "archived") && <button onClick={() => restore(record)}>恢复</button>}{!record.deletedAt && <button className="danger-link" onClick={() => remove(record)}>删除</button>}</div></article>)}</div>}</section>
+    {editing && <RecordEditor record={editing} close={() => setEditing(null)} save={update} />}
+    {historyFor && <HistoryModal record={historyFor} history={history} close={() => { setHistoryFor(null); setHistory([]); }} />}
   </div>;
 }
 
-function AddRecordModal({ type, close, commit, changeType }: { type: Exclude<ModalType, null>; close: () => void; commit: (updater: (current: ResearchStore) => ResearchStore, message?: string) => void; changeType: (type: ModalType) => void }) {
+function RecordEditor({ record, close, save }: { record: RecordDto; close: () => void; save: (record: RecordDto, patch: { title: string; summary: string; payload: Record<string, unknown> }, reason?: string) => Promise<RecordDto> }) {
+  const [title, setTitle] = useState(record.title);
+  const [summary, setSummary] = useState(record.summary);
+  const [payload, setPayload] = useState(JSON.stringify(record.payload, null, 2));
+  const [reason, setReason] = useState("");
+  const [error, setError] = useState("");
+  async function submit(event: FormEvent) {
+    event.preventDefault();
+    try {
+      const parsed = JSON.parse(payload) as Record<string, unknown>;
+      await save(record, { title, summary, payload: parsed }, reason || undefined);
+      close();
+    } catch (saveError) {
+      setError(saveError instanceof Error ? saveError.message : "保存失败。");
+    }
+  }
+  return <div className="modal-backdrop"><section className="modal-card" role="dialog" aria-modal="true" aria-label="编辑记录"><div className="modal-head"><div><p className="eyebrow">RECORD v{record.revision}</p><h2>编辑{record.title}</h2></div><button aria-label="关闭" onClick={close}><X size={19} /></button></div><form onSubmit={submit}><label className="form-field"><span>标题</span><input required value={title} onChange={(event) => setTitle(event.target.value)} /></label><label className="form-field"><span>摘要</span><textarea value={summary} onChange={(event) => setSummary(event.target.value)} /></label><label className="form-field"><span>结构化字段 JSON</span><textarea className="json-editor" value={payload} onChange={(event) => setPayload(event.target.value)} spellCheck={false} /></label><label className="form-field"><span>变更理由{record.kind === "hypothesis" ? " *" : ""}</span><input required={record.kind === "hypothesis"} value={reason} onChange={(event) => setReason(event.target.value)} placeholder="为什么修改；假设、置信度或证伪条件变更时必填" /></label>{error && <p className="form-error">{error}</p>}<div className="modal-actions"><button type="button" className="button ghost" onClick={close}>取消</button><button className="button primary" type="submit">保存新版本</button></div></form></section></div>;
+}
+
+function HistoryModal({ record, history, close }: { record: RecordDto; history: RevisionDto[]; close: () => void }) {
+  return <div className="modal-backdrop"><section className="modal-card history-modal" role="dialog" aria-modal="true" aria-label="历史版本"><div className="modal-head"><div><p className="eyebrow">REVISION HISTORY</p><h2>{record.title}</h2></div><button aria-label="关闭" onClick={close}><X size={19} /></button></div><div className="history-list">{history.map((item) => <article key={item.id}><span>v{item.revision}</span><div><strong>{item.changeReason || "未填写理由"}</strong><p>{new Date(item.createdAt).toLocaleString("zh-CN")} · {item.changedBy}</p></div></article>)}</div><div className="modal-actions"><button className="button ghost" onClick={close}>关闭</button></div></section></div>;
+}
+
+function AddRecordModal({ type, close, create, changeType }: { type: Exclude<ModalType, null>; close: () => void; create: (type: Exclude<ModalType, null>, value: Record<string, unknown>) => Promise<void>; changeType: (type: ModalType) => void }) {
   const [form, setForm] = useState<Record<string, string>>({});
   const set = (key: string, value: string) => setForm((current) => ({ ...current, [key]: value }));
-  function submit(event: FormEvent) {
+  async function submit(event: FormEvent) {
     event.preventDefault();
     if (!form.title?.trim()) return;
     if (type === "signal") {
-      const item: Signal = { id: makeId("sig"), title: form.title.trim(), summary: form.summary?.trim() || "待补充摘要", quadrant: (form.quadrant as RadarQuadrant) || "需求与商业", ring: (form.ring as RadarRing) || "关注", movement: "稳定", impact: 0, confidence: 50, sourceName: form.source?.trim() || "个人观察 / 待验证", sourceUrl: form.url?.trim() || undefined, observedAt: new Date().toISOString().slice(0, 10), tags: form.tags?.split(/[，,]/).map((x) => x.trim()).filter(Boolean) || [] };
-      commit((current) => ({ ...current, signals: [item, ...current.signals] }), "行业信号已新增");
+      await create(type, { title: form.title.trim(), summary: form.summary?.trim() || "待补充摘要", quadrant: form.quadrant || "需求与商业", ring: form.ring || "关注", movement: "稳定", impact: 0, confidence: 50, sourceName: form.source?.trim() || "个人观察 / 待验证", ...(form.url?.trim() ? { sourceUrl: form.url.trim() } : {}), observedAt: new Date().toISOString().slice(0, 10), tags: form.tags?.split(/[，,]/).map((x) => x.trim()).filter(Boolean) || [] });
     }
     if (type === "skill") {
-      const item: Skill = { id: makeId("sk"), name: form.title.trim(), category: form.category || "研究", level: 0, target: 3, priority: (form.priority as Skill["priority"]) || "中", evidence: form.evidence || "暂无验证证据", nextAction: form.action || "定义一个可在两周内完成的验证动作", crisisValue: form.value || "待评估" };
-      commit((current) => ({ ...current, skills: [item, ...current.skills] }), "技能条目已新增");
+      await create(type, { name: form.title.trim(), category: form.category || "研究", level: 0, target: 3, priority: form.priority || "中", evidence: form.evidence || "暂无验证证据", nextAction: form.action || "定义一个可在两周内完成的验证动作", crisisValue: form.value || "待评估" });
     }
     if (type === "opportunity") {
-      const item: Opportunity = { id: makeId("opp"), title: form.title.trim(), horizon: (form.horizon as Opportunity["horizon"]) || "现在", status: "观察", trigger: form.trigger || "待定义可观察触发器", targetUser: form.user || "待验证目标用户", readiness: 40, timing: 50, resilience: 60, nextAction: form.action || "完成一次最小需求验证" };
-      commit((current) => ({ ...current, opportunities: [item, ...current.opportunities] }), "机会条目已新增");
+      await create(type, { title: form.title.trim(), horizon: form.horizon || "现在", status: "观察", trigger: form.trigger || "待定义可观察触发器", targetUser: form.user || "待验证目标用户", readiness: 40, timing: 50, resilience: 60, nextAction: form.action || "完成一次最小需求验证" });
     }
     if (type === "discussion") {
-      const item: Discussion = { id: makeId("dis"), title: form.title.trim(), category: (form.discussionCategory as Discussion["category"]) || "研究问题", body: form.body || "待补充讨论背景与希望得到的结论。", author: "Mina", createdAt: new Date().toISOString().slice(0, 10), replies: 0, status: "开放" };
-      commit((current) => ({ ...current, discussions: [item, ...current.discussions] }), "讨论已发起");
+      await create(type, { title: form.title.trim(), category: form.discussionCategory || "研究问题", body: form.body || "待补充讨论背景与希望得到的结论。", author: "Mina", createdAt: new Date().toISOString().slice(0, 10), replies: 0, status: "开放" });
     }
     close();
   }
