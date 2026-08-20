@@ -255,7 +255,7 @@ export function ForesightApp({ initialUser }: { initialUser: InitialUser }) {
         </nav>
         <div className="sidebar-bottom">
           <div className="local-status"><ShieldCheck size={16} /><div><strong>私有云端模式</strong><span>{research.data.user.email}</span></div></div>
-          <div className="version-line"><span>PERSONAL v0.2</span><a href="/signout-with-chatgpt?return_to=/">退出</a></div>
+          <div className="version-line"><span>PERSONAL v0.3</span><a href="/signout-with-chatgpt?return_to=/">退出</a></div>
         </div>
       </aside>
 
