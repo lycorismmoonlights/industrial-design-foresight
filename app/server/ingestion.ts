@@ -1,12 +1,19 @@
-import { getD1 } from "../../db";
+import { getAppEnv, getD1 } from "../../db";
 import type { EvidenceDto, SourceDto } from "../v2-model";
 import { AppError } from "./errors";
 import { discoverFeedUrl, parseFeed } from "./feed";
 import { assertPublicHttpUrl, safeFetchText } from "./network-safety";
 import { createRecord } from "./repository";
+import {
+  ADAPTER_TYPES,
+  SOURCE_CADENCES,
+  fetchApiAdapter,
+  validateAdapterConfig,
+  type NormalizedSourceItem,
+} from "./source-adapters";
 
 type Row = Record<string, unknown>;
-const SOURCE_TYPES = new Set(["rss", "atom", "manual"]);
+const SOURCE_TYPES = new Set(["rss", "atom", "api", "manual"]);
 const STANCES = new Set(["supports", "opposes", "context"]);
 
 function now() {
@@ -30,6 +37,24 @@ function oneToFive(value: unknown, field: string): number {
   return number;
 }
 
+function oneToHundred(value: unknown, field: string): number {
+  const number = Number(value);
+  if (!Number.isInteger(number) || number < 1 || number > 100) {
+    throw new AppError(400, "VALIDATION_ERROR", `${field} 必须是 1–100 的整数。`);
+  }
+  return number;
+}
+
+function parseObject(value: unknown): Record<string, unknown> {
+  if (typeof value !== "string") return {};
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, unknown> : {};
+  } catch {
+    return {};
+  }
+}
+
 function sourceFromRow(row: Row): SourceDto {
   return {
     id: String(row.id),
@@ -37,6 +62,11 @@ function sourceFromRow(row: Row): SourceDto {
     pageUrl: row.page_url ? String(row.page_url) : null,
     feedUrl: row.feed_url ? String(row.feed_url) : null,
     sourceType: String(row.source_type) as SourceDto["sourceType"],
+    adapterType: String(row.adapter_type ?? "rss") as SourceDto["adapterType"],
+    adapterConfig: parseObject(row.adapter_config_json),
+    cadence: String(row.cadence ?? "daily") as SourceDto["cadence"],
+    nextFetchAt: row.next_fetch_at ? String(row.next_fetch_at) : null,
+    maxItemsPerRun: Number(row.max_items_per_run ?? 30),
     sourceCategory: String(row.source_category),
     defaultCredibility: Number(row.default_credibility),
     enabled: Boolean(row.enabled),
@@ -84,6 +114,10 @@ export async function createSource(ownerId: string, input: {
   pageUrl?: string | null;
   feedUrl?: string | null;
   sourceType?: SourceDto["sourceType"];
+  adapterType?: SourceDto["adapterType"];
+  adapterConfig?: Record<string, unknown>;
+  cadence?: SourceDto["cadence"];
+  maxItemsPerRun?: number;
   sourceCategory?: string;
   defaultCredibility?: number;
   enabled?: boolean;
@@ -91,16 +125,26 @@ export async function createSource(ownerId: string, input: {
 }): Promise<SourceDto> {
   const name = input.name?.trim();
   if (!name) throw new AppError(400, "VALIDATION_ERROR", "来源名称不能为空。");
+  let adapterType = input.adapterType ?? (input.sourceType === "manual" ? "manual" : "rss");
+  if (!ADAPTER_TYPES.includes(adapterType)) throw new AppError(400, "INVALID_ADAPTER_TYPE", "未知来源适配器。");
+  const cadence = input.cadence ?? "daily";
+  if (!SOURCE_CADENCES.includes(cadence)) throw new AppError(400, "INVALID_SOURCE_CADENCE", "未知抓取周期。");
+  const maxItemsPerRun = oneToHundred(input.maxItemsPerRun ?? 30, "单次条目上限");
+  const adapterConfig = validateAdapterConfig(adapterType, input.adapterConfig);
   let pageUrl = asOptionalUrl(input.pageUrl);
   let feedUrl = asOptionalUrl(input.feedUrl);
-  if (!pageUrl && !feedUrl) throw new AppError(400, "SOURCE_URL_REQUIRED", "至少填写网页地址或订阅地址。");
-  if (!feedUrl && pageUrl) {
+  const isApiAdapter = !["rss", "manual"].includes(adapterType);
+  if (!isApiAdapter && !pageUrl && !feedUrl) throw new AppError(400, "SOURCE_URL_REQUIRED", "至少填写网页地址或订阅地址。");
+  if (isApiAdapter && feedUrl) throw new AppError(400, "INVALID_SOURCE_URL", "API 来源不能同时配置订阅地址。");
+  if (adapterType === "manual" && feedUrl) throw new AppError(400, "INVALID_SOURCE_URL", "人工来源不能同时配置订阅地址。");
+  if (adapterType === "rss" && !feedUrl && pageUrl) {
     const { response, body, finalUrl } = await safeFetchText(pageUrl, { headers: { accept: "text/html,application/xhtml+xml" } });
     if (!response.ok) throw new AppError(502, "SOURCE_DISCOVERY_FAILED", `网页返回 HTTP ${response.status}。`);
     pageUrl = finalUrl;
     feedUrl = await discoverFeedUrl(body, finalUrl);
   }
-  const sourceType = feedUrl ? (input.sourceType === "atom" ? "atom" : "rss") : "manual";
+  if (adapterType === "rss" && !feedUrl) adapterType = "manual";
+  const sourceType = isApiAdapter ? "api" : feedUrl ? (input.sourceType === "atom" ? "atom" : "rss") : "manual";
   if (!SOURCE_TYPES.has(sourceType)) throw new AppError(400, "INVALID_SOURCE_TYPE", "未知来源类型。");
   if (input.enabled && !input.confirmEnable) {
     throw new AppError(400, "SOURCE_ENABLE_CONFIRMATION_REQUIRED", "首次启用来源必须明确确认。");
@@ -108,8 +152,8 @@ export async function createSource(ownerId: string, input: {
   const timestamp = now();
   const id = uuid();
   try {
-    await getD1().prepare("INSERT INTO sources (id, owner_id, name, page_url, feed_url, source_type, source_category, default_credibility, enabled, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
-      .bind(id, ownerId, name, pageUrl, feedUrl, sourceType, input.sourceCategory?.trim() || "industry_media", oneToFive(input.defaultCredibility ?? 3, "默认可信度"), input.enabled ? 1 : 0, timestamp, timestamp).run();
+    await getD1().prepare("INSERT INTO sources (id, owner_id, name, page_url, feed_url, source_type, adapter_type, adapter_config_json, cadence, max_items_per_run, source_category, default_credibility, enabled, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+      .bind(id, ownerId, name, pageUrl, feedUrl, sourceType, adapterType, JSON.stringify(adapterConfig), cadence, maxItemsPerRun, input.sourceCategory?.trim() || "industry_media", oneToFive(input.defaultCredibility ?? 3, "默认可信度"), input.enabled ? 1 : 0, timestamp, timestamp).run();
   } catch (error) {
     if (error instanceof AppError) throw error;
     throw new AppError(409, "SOURCE_ALREADY_EXISTS", "这个订阅地址已经存在。");
@@ -121,6 +165,10 @@ export async function updateSource(ownerId: string, id: string, patch: {
   name?: string;
   pageUrl?: string | null;
   feedUrl?: string | null;
+  adapterType?: SourceDto["adapterType"];
+  adapterConfig?: Record<string, unknown>;
+  cadence?: SourceDto["cadence"];
+  maxItemsPerRun?: number;
   sourceCategory?: string;
   defaultCredibility?: number;
   enabled?: boolean;
@@ -134,10 +182,19 @@ export async function updateSource(ownerId: string, id: string, patch: {
   if (!name) throw new AppError(400, "VALIDATION_ERROR", "来源名称不能为空。");
   const pageUrl = patch.pageUrl === undefined ? (current.page_url ? String(current.page_url) : null) : asOptionalUrl(patch.pageUrl);
   const feedUrl = patch.feedUrl === undefined ? (current.feed_url ? String(current.feed_url) : null) : asOptionalUrl(patch.feedUrl);
-  const sourceType = feedUrl ? String(current.source_type === "atom" ? "atom" : "rss") : "manual";
+  const adapterType = patch.adapterType ?? String(current.adapter_type ?? "rss") as SourceDto["adapterType"];
+  if (!ADAPTER_TYPES.includes(adapterType)) throw new AppError(400, "INVALID_ADAPTER_TYPE", "未知来源适配器。");
+  const cadence = patch.cadence ?? String(current.cadence ?? "daily") as SourceDto["cadence"];
+  if (!SOURCE_CADENCES.includes(cadence)) throw new AppError(400, "INVALID_SOURCE_CADENCE", "未知抓取周期。");
+  const adapterConfig = validateAdapterConfig(adapterType, patch.adapterConfig ?? parseObject(current.adapter_config_json));
+  const isApiAdapter = !["rss", "manual"].includes(adapterType);
+  if (isApiAdapter && feedUrl) throw new AppError(400, "INVALID_SOURCE_URL", "API 来源不能同时配置订阅地址。");
+  if (adapterType === "manual" && feedUrl) throw new AppError(400, "INVALID_SOURCE_URL", "人工来源不能同时配置订阅地址。");
+  if (adapterType === "rss" && !feedUrl) throw new AppError(400, "SOURCE_URL_REQUIRED", "RSS 来源必须保留订阅地址。");
+  const sourceType = isApiAdapter ? "api" : feedUrl ? String(current.source_type === "atom" ? "atom" : "rss") : "manual";
   const timestamp = now();
-  await getD1().prepare("UPDATE sources SET name = ?, page_url = ?, feed_url = ?, source_type = ?, source_category = ?, default_credibility = ?, enabled = ?, updated_at = ? WHERE id = ? AND owner_id = ?")
-    .bind(name, pageUrl, feedUrl, sourceType, patch.sourceCategory?.trim() || String(current.source_category), oneToFive(patch.defaultCredibility ?? current.default_credibility, "默认可信度"), patch.enabled === undefined ? Number(current.enabled) : patch.enabled ? 1 : 0, timestamp, id, ownerId).run();
+  await getD1().prepare("UPDATE sources SET name = ?, page_url = ?, feed_url = ?, source_type = ?, adapter_type = ?, adapter_config_json = ?, cadence = ?, max_items_per_run = ?, next_fetch_at = NULL, source_category = ?, default_credibility = ?, enabled = ?, updated_at = ? WHERE id = ? AND owner_id = ?")
+    .bind(name, pageUrl, feedUrl, sourceType, adapterType, JSON.stringify(adapterConfig), cadence, oneToHundred(patch.maxItemsPerRun ?? current.max_items_per_run ?? 30, "单次条目上限"), patch.sourceCategory?.trim() || String(current.source_category), oneToFive(patch.defaultCredibility ?? current.default_credibility, "默认可信度"), patch.enabled === undefined ? Number(current.enabled) : patch.enabled ? 1 : 0, timestamp, id, ownerId).run();
   return sourceFromRow((await ownedSource(ownerId, id)));
 }
 
@@ -149,12 +206,43 @@ export interface FetchSourceResult {
   error?: string;
 }
 
-async function recordSync(ownerId: string, sourceId: string, startedAt: string, status: FetchSourceResult["status"], durationMs: number, newCount: number, error: string | null) {
+export function nextFetchAtForCadence(cadence: SourceDto["cadence"], timestamp: string): string {
+  const beijingOffsetMs = 8 * 60 * 60 * 1000;
+  const beijing = new Date(new Date(timestamp).getTime() + beijingOffsetMs);
+  const nextLocalMidnight = new Date(Date.UTC(beijing.getUTCFullYear(), beijing.getUTCMonth(), beijing.getUTCDate()));
+  if (cadence === "monthly") nextLocalMidnight.setUTCMonth(nextLocalMidnight.getUTCMonth() + 1);
+  else nextLocalMidnight.setUTCDate(nextLocalMidnight.getUTCDate() + (cadence === "weekly" ? 7 : 1));
+  return new Date(nextLocalMidnight.getTime() - beijingOffsetMs).toISOString();
+}
+
+async function insertNormalizedItems(ownerId: string, sourceId: string, entries: NormalizedSourceItem[], maximum: number): Promise<number> {
+  const db = getD1();
+  const existingResult = await db.prepare("SELECT guid, canonical_url, content_hash FROM inbox_items WHERE owner_id = ? AND source_id = ?").bind(ownerId, sourceId).all<Row>();
+  const existing = existingResult.results ?? [];
+  const guids = new Set(existing.map((row) => row.guid ? String(row.guid) : "").filter(Boolean));
+  const urls = new Set(existing.map((row) => row.canonical_url ? String(row.canonical_url) : "").filter(Boolean));
+  const hashes = new Set(existing.map((row) => String(row.content_hash)));
+  const timestamp = now();
+  const inserts: D1PreparedStatement[] = [];
+  for (const entry of entries.slice(0, maximum)) {
+    if ((entry.guid && guids.has(entry.guid)) || (entry.canonicalUrl && urls.has(entry.canonicalUrl)) || hashes.has(entry.contentHash)) continue;
+    const dedupeKey = entry.guid ? `guid:${entry.guid}` : entry.canonicalUrl ? `url:${entry.canonicalUrl}` : `hash:${entry.contentHash}`;
+    inserts.push(db.prepare("INSERT INTO inbox_items (id, owner_id, source_id, guid, canonical_url, content_hash, dedupe_key, title, summary, author, published_at, review_status, ai_status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 'pending', ?)")
+      .bind(uuid(), ownerId, sourceId, entry.guid, entry.canonicalUrl, entry.contentHash, dedupeKey, entry.title, entry.summary, entry.author, entry.publishedAt, timestamp));
+    if (entry.guid) guids.add(entry.guid);
+    if (entry.canonicalUrl) urls.add(entry.canonicalUrl);
+    hashes.add(entry.contentHash);
+  }
+  if (inserts.length) await db.batch(inserts);
+  return inserts.length;
+}
+
+async function recordSync(ownerId: string, sourceId: string, cadence: SourceDto["cadence"], startedAt: string, status: FetchSourceResult["status"], durationMs: number, newCount: number, error: string | null) {
   const finishedAt = now();
   const success = status !== "failed";
   await getD1().batch([
-    getD1().prepare("UPDATE sources SET last_fetch_at = ?, last_success_at = CASE WHEN ? = 1 THEN ? ELSE last_success_at END, last_error = ?, last_duration_ms = ?, last_new_count = ?, updated_at = ? WHERE id = ? AND owner_id = ?")
-      .bind(finishedAt, success ? 1 : 0, finishedAt, error, durationMs, newCount, finishedAt, sourceId, ownerId),
+    getD1().prepare("UPDATE sources SET last_fetch_at = ?, last_success_at = CASE WHEN ? = 1 THEN ? ELSE last_success_at END, last_error = ?, last_duration_ms = ?, last_new_count = ?, next_fetch_at = ?, updated_at = ? WHERE id = ? AND owner_id = ?")
+      .bind(finishedAt, success ? 1 : 0, finishedAt, error, durationMs, newCount, nextFetchAtForCadence(cadence, finishedAt), finishedAt, sourceId, ownerId),
     getD1().prepare("INSERT INTO sync_runs (id, owner_id, source_id, status, duration_ms, new_count, error, started_at, finished_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
       .bind(uuid(), ownerId, sourceId, status, durationMs, newCount, error, startedAt, finishedAt),
   ]);
@@ -162,57 +250,56 @@ async function recordSync(ownerId: string, sourceId: string, startedAt: string, 
 
 export async function fetchSource(ownerId: string, sourceId: string): Promise<FetchSourceResult> {
   const source = await ownedSource(ownerId, sourceId);
-  if (!source.feed_url) throw new AppError(400, "SOURCE_HAS_NO_FEED", "这个来源没有可抓取的 RSS/Atom 地址。");
+  const adapterType = String(source.adapter_type ?? (source.feed_url ? "rss" : "manual")) as SourceDto["adapterType"];
+  const cadence = String(source.cadence ?? "daily") as SourceDto["cadence"];
+  const maximum = oneToHundred(source.max_items_per_run ?? 30, "单次条目上限");
+  if (adapterType === "manual") throw new AppError(400, "SOURCE_IS_MANUAL", "人工来源不能自动抓取。");
+  if (adapterType === "rss" && !source.feed_url) throw new AppError(400, "SOURCE_HAS_NO_FEED", "这个来源没有可抓取的 RSS/Atom 地址。");
   const startedAt = now();
   const started = Date.now();
   try {
+    if (adapterType !== "rss") {
+      const entries = await fetchApiAdapter({
+        adapterType: adapterType as Exclude<SourceDto["adapterType"], "rss" | "manual">,
+        adapterConfig: parseObject(source.adapter_config_json),
+        maxItemsPerRun: maximum,
+      }, getAppEnv());
+      const newCount = await insertNormalizedItems(ownerId, sourceId, entries, maximum);
+      const durationMs = Date.now() - started;
+      await recordSync(ownerId, sourceId, cadence, startedAt, "success", durationMs, newCount, null);
+      return { sourceId, status: "success", newCount, durationMs };
+    }
     const headers = new Headers({
       accept: "application/atom+xml, application/rss+xml, application/xml, text/xml;q=0.9",
-      "user-agent": "IndustrialDesignForesight/0.2 (+private research feed reader)",
+      "user-agent": "IndustrialDesignForesight/0.3 (+private research feed reader)",
     });
     if (source.etag) headers.set("if-none-match", String(source.etag));
     if (source.last_modified) headers.set("if-modified-since", String(source.last_modified));
     const fetched = await safeFetchText(String(source.feed_url), { headers });
     const durationMs = Date.now() - started;
     if (fetched.response.status === 304) {
-      await recordSync(ownerId, sourceId, startedAt, "not_modified", durationMs, 0, null);
+      await recordSync(ownerId, sourceId, cadence, startedAt, "not_modified", durationMs, 0, null);
       return { sourceId, status: "not_modified", newCount: 0, durationMs };
     }
     if (!fetched.response.ok) throw new AppError(502, "SOURCE_HTTP_ERROR", `来源返回 HTTP ${fetched.response.status}。`);
     const feed = await parseFeed(fetched.body, fetched.finalUrl);
-    const db = getD1();
-    const existingResult = await db.prepare("SELECT guid, canonical_url, content_hash FROM inbox_items WHERE owner_id = ? AND source_id = ?").bind(ownerId, sourceId).all<Row>();
-    const existing = existingResult.results ?? [];
-    const guids = new Set(existing.map((row) => row.guid ? String(row.guid) : "").filter(Boolean));
-    const urls = new Set(existing.map((row) => row.canonical_url ? String(row.canonical_url) : "").filter(Boolean));
-    const hashes = new Set(existing.map((row) => String(row.content_hash)));
-    const timestamp = now();
-    const inserts: D1PreparedStatement[] = [];
-    for (const entry of feed.entries) {
-      if ((entry.guid && guids.has(entry.guid)) || (entry.canonicalUrl && urls.has(entry.canonicalUrl)) || hashes.has(entry.contentHash)) continue;
-      const dedupeKey = entry.guid ? `guid:${entry.guid}` : entry.canonicalUrl ? `url:${entry.canonicalUrl}` : `hash:${entry.contentHash}`;
-      inserts.push(db.prepare("INSERT INTO inbox_items (id, owner_id, source_id, guid, canonical_url, content_hash, dedupe_key, title, summary, author, published_at, review_status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)")
-        .bind(uuid(), ownerId, sourceId, entry.guid, entry.canonicalUrl, entry.contentHash, dedupeKey, entry.title, entry.summary, entry.author, entry.publishedAt, timestamp));
-      if (entry.guid) guids.add(entry.guid);
-      if (entry.canonicalUrl) urls.add(entry.canonicalUrl);
-      hashes.add(entry.contentHash);
-    }
-    if (inserts.length) await db.batch(inserts);
-    await db.prepare("UPDATE sources SET source_type = ?, etag = ?, last_modified = ? WHERE id = ? AND owner_id = ?")
+    const newCount = await insertNormalizedItems(ownerId, sourceId, feed.entries, maximum);
+    await getD1().prepare("UPDATE sources SET source_type = ?, etag = ?, last_modified = ? WHERE id = ? AND owner_id = ?")
       .bind(feed.type, fetched.response.headers.get("etag"), fetched.response.headers.get("last-modified"), sourceId, ownerId).run();
-    await recordSync(ownerId, sourceId, startedAt, "success", durationMs, inserts.length, null);
-    return { sourceId, status: "success", newCount: inserts.length, durationMs };
+    await recordSync(ownerId, sourceId, cadence, startedAt, "success", durationMs, newCount, null);
+    return { sourceId, status: "success", newCount, durationMs };
   } catch (error) {
     const durationMs = Date.now() - started;
     const message = error instanceof Error ? error.message : "未知抓取错误";
-    await recordSync(ownerId, sourceId, startedAt, "failed", durationMs, 0, message);
+    await recordSync(ownerId, sourceId, cadence, startedAt, "failed", durationMs, 0, message);
     if (error instanceof AppError) throw error;
     throw new AppError(502, "SOURCE_FETCH_FAILED", message);
   }
 }
 
 export async function fetchAllEnabledSources(): Promise<FetchSourceResult[]> {
-  const result = await getD1().prepare("SELECT owner_id, id FROM sources WHERE enabled = 1 AND feed_url IS NOT NULL ORDER BY owner_id, name").all<Row>();
+  const result = await getD1().prepare("SELECT owner_id, id FROM sources WHERE enabled = 1 AND adapter_type != 'manual' AND (next_fetch_at IS NULL OR next_fetch_at <= ?) ORDER BY owner_id, name")
+    .bind(now()).all<Row>();
   const outcomes: FetchSourceResult[] = [];
   for (const row of result.results ?? []) {
     try {

@@ -160,6 +160,8 @@ export function useResearchData(initialUser: InitialUser) {
 
   async function createSource(input: {
     name: string; pageUrl?: string | null; feedUrl?: string | null; sourceCategory?: string;
+    adapterType?: SourceDto["adapterType"]; adapterConfig?: Record<string, unknown>;
+    cadence?: SourceDto["cadence"]; maxItemsPerRun?: number;
     defaultCredibility?: number; enabled?: boolean; confirmEnable?: boolean;
   }) {
     const source = await apiRequest<SourceDto>("/api/sources", { method: "POST", body: JSON.stringify(input) });
@@ -167,7 +169,7 @@ export function useResearchData(initialUser: InitialUser) {
     return source;
   }
 
-  async function updateSource(id: string, patch: Partial<Pick<SourceDto, "name" | "pageUrl" | "feedUrl" | "sourceCategory" | "defaultCredibility" | "enabled">>, confirmEnable = false) {
+  async function updateSource(id: string, patch: Partial<Pick<SourceDto, "name" | "pageUrl" | "feedUrl" | "adapterType" | "adapterConfig" | "cadence" | "maxItemsPerRun" | "sourceCategory" | "defaultCredibility" | "enabled">>, confirmEnable = false) {
     const source = await apiRequest<SourceDto>("/api/sources", { method: "PATCH", body: JSON.stringify({ id, patch, confirmEnable }) });
     await refresh();
     return source;

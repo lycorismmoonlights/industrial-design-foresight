@@ -58,6 +58,11 @@ function sourceFromRow(row: Row): SourceDto {
     pageUrl: row.page_url ? String(row.page_url) : null,
     feedUrl: row.feed_url ? String(row.feed_url) : null,
     sourceType: String(row.source_type) as SourceDto["sourceType"],
+    adapterType: String(row.adapter_type ?? "rss") as SourceDto["adapterType"],
+    adapterConfig: parseJson<Record<string, unknown>>(row.adapter_config_json, {}),
+    cadence: String(row.cadence ?? "daily") as SourceDto["cadence"],
+    nextFetchAt: row.next_fetch_at ? String(row.next_fetch_at) : null,
+    maxItemsPerRun: Number(row.max_items_per_run ?? 30),
     sourceCategory: String(row.source_category),
     defaultCredibility: Number(row.default_credibility),
     enabled: Boolean(row.enabled),
@@ -82,6 +87,16 @@ function inboxFromRow(row: Row): InboxItemDto {
     publishedAt: row.published_at ? String(row.published_at) : null,
     reviewStatus: String(row.review_status) as InboxItemDto["reviewStatus"],
     recordId: row.record_id ? String(row.record_id) : null,
+    aiStatus: String(row.ai_status ?? "pending") as InboxItemDto["aiStatus"],
+    aiSummary: row.ai_summary ? String(row.ai_summary) : null,
+    aiQuadrant: row.ai_quadrant ? String(row.ai_quadrant) : null,
+    aiRelevance: row.ai_relevance === null || row.ai_relevance === undefined ? null : Number(row.ai_relevance),
+    aiStanceSuggestion: row.ai_stance_suggestion ? String(row.ai_stance_suggestion) as InboxItemDto["aiStanceSuggestion"] : null,
+    aiTags: parseJson<string[]>(row.ai_tags_json, []),
+    aiHypothesisLinks: parseJson<string[]>(row.ai_hypothesis_links_json, []),
+    aiModel: row.ai_model ? String(row.ai_model) : null,
+    aiProcessedAt: row.ai_processed_at ? String(row.ai_processed_at) : null,
+    aiError: row.ai_error ? String(row.ai_error) : null,
     createdAt: String(row.created_at),
   };
 }
@@ -155,7 +170,7 @@ export async function updateSettings(ownerId: string, patch: Record<string, unkn
     if (typeof patch.timezone !== "string") throw new AppError(400, "INVALID_TIMEZONE", "时区必须是 IANA 时区名称。");
     try { new Intl.DateTimeFormat("zh-CN", { timeZone: patch.timezone }).format(); } catch { throw new AppError(400, "INVALID_TIMEZONE", "时区必须是有效的 IANA 时区名称。"); }
   }
-  if (patch.reviewCadence !== undefined && patch.reviewCadence !== "weekly") throw new AppError(400, "INVALID_REVIEW_CADENCE", "v0.2 仅支持每周复盘节奏。");
+  if (patch.reviewCadence !== undefined && patch.reviewCadence !== "weekly") throw new AppError(400, "INVALID_REVIEW_CADENCE", "v0.3 仅支持每周复盘节奏。");
   if (patch.reviewDay !== undefined && (!Number.isInteger(patch.reviewDay) || Number(patch.reviewDay) < 0 || Number(patch.reviewDay) > 6)) throw new AppError(400, "INVALID_REVIEW_DAY", "复盘日必须在 0–6 之间。");
   if (patch.reviewMinutes !== undefined && (!Number.isInteger(patch.reviewMinutes) || Number(patch.reviewMinutes) < 15 || Number(patch.reviewMinutes) > 120)) throw new AppError(400, "INVALID_REVIEW_MINUTES", "复盘时长必须在 15–120 分钟之间。");
   const timestamp = now();

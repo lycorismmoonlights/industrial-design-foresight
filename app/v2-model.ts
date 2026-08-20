@@ -33,7 +33,12 @@ export interface SourceDto {
   name: string;
   pageUrl: string | null;
   feedUrl: string | null;
-  sourceType: "rss" | "atom" | "manual";
+  sourceType: "rss" | "atom" | "api" | "manual";
+  adapterType: "rss" | "bls" | "fred" | "sec" | "eurostat" | "manual";
+  adapterConfig: Record<string, unknown>;
+  cadence: "daily" | "weekly" | "monthly";
+  nextFetchAt: string | null;
+  maxItemsPerRun: number;
   sourceCategory: string;
   defaultCredibility: number;
   enabled: boolean;
@@ -56,6 +61,16 @@ export interface InboxItemDto {
   publishedAt: string | null;
   reviewStatus: "pending" | "rejected" | "ignored" | "converted";
   recordId: string | null;
+  aiStatus: "pending" | "processing" | "retry" | "completed" | "failed";
+  aiSummary: string | null;
+  aiQuadrant: string | null;
+  aiRelevance: number | null;
+  aiStanceSuggestion: "supports" | "opposes" | "context" | null;
+  aiTags: string[];
+  aiHypothesisLinks: string[];
+  aiModel: string | null;
+  aiProcessedAt: string | null;
+  aiError: string | null;
   createdAt: string;
 }
 
