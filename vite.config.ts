@@ -14,9 +14,18 @@ const isCodexSeatbeltSandbox = process.env.CODEX_SANDBOX === "seatbelt";
 const localBindingConfig = {
   main: "./worker/index.ts",
   compatibility_flags: ["nodejs_compat"],
-  triggers: { crons: ["30 0 * * *"] },
+  // Cloudflare Cron uses UTC. 16:00 UTC is 00:00 in Asia/Shanghai.
+  triggers: { crons: ["0 16 * * *"] },
   vars: {
     ...(process.env.OWNER_EMAIL ? { OWNER_EMAIL: process.env.OWNER_EMAIL } : {}),
+    ...(process.env.DEEPSEEK_API_KEY ? { DEEPSEEK_API_KEY: process.env.DEEPSEEK_API_KEY } : {}),
+    ...(process.env.DEEPSEEK_MODEL ? { DEEPSEEK_MODEL: process.env.DEEPSEEK_MODEL } : {}),
+    ...(process.env.AI_PROCESSING_ENABLED ? { AI_PROCESSING_ENABLED: process.env.AI_PROCESSING_ENABLED } : {}),
+    ...(process.env.AI_DAILY_ITEM_LIMIT ? { AI_DAILY_ITEM_LIMIT: process.env.AI_DAILY_ITEM_LIMIT } : {}),
+    ...(process.env.AI_MAX_ATTEMPTS ? { AI_MAX_ATTEMPTS: process.env.AI_MAX_ATTEMPTS } : {}),
+    ...(process.env.FRED_API_KEY ? { FRED_API_KEY: process.env.FRED_API_KEY } : {}),
+    ...(process.env.BLS_API_KEY ? { BLS_API_KEY: process.env.BLS_API_KEY } : {}),
+    ...(process.env.SEC_USER_AGENT ? { SEC_USER_AGENT: process.env.SEC_USER_AGENT } : {}),
     APP_ENV: process.env.APP_ENV ?? "development",
   },
   d1_databases: d1

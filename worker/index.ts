@@ -1,11 +1,19 @@
 /** Cloudflare Worker entry point for the vinext-starter template. */
 import { handleImageOptimization, DEFAULT_DEVICE_SIZES, DEFAULT_IMAGE_SIZES } from "vinext/server/image-optimization";
 import handler from "vinext/server/app-router-entry";
-import { scheduleSourceIngestion } from "./scheduled";
+import { scheduleDailyResearch } from "./scheduled";
 
 interface Env {
   ASSETS: Fetcher;
   DB: D1Database;
+  DEEPSEEK_API_KEY?: string;
+  DEEPSEEK_MODEL?: string;
+  AI_PROCESSING_ENABLED?: string;
+  AI_DAILY_ITEM_LIMIT?: string;
+  AI_MAX_ATTEMPTS?: string;
+  FRED_API_KEY?: string;
+  BLS_API_KEY?: string;
+  SEC_USER_AGENT?: string;
   IMAGES: {
     input(stream: ReadableStream): {
       transform(options: Record<string, unknown>): {
@@ -43,8 +51,8 @@ const worker = {
 
     return handler.fetch(request, env, ctx);
   },
-  async scheduled(_controller: ScheduledController, _env: Env, ctx: ExecutionContext): Promise<void> {
-    scheduleSourceIngestion(ctx);
+  async scheduled(controller: ScheduledController, _env: Env, ctx: ExecutionContext): Promise<void> {
+    scheduleDailyResearch(ctx, controller.scheduledTime);
   },
 };
 
