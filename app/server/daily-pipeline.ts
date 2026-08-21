@@ -14,6 +14,15 @@ export interface DailyPipelineResult {
   ai: AiBatchResult | null;
 }
 
+export interface DailyPipelineOptions {
+  scheduledFor?: number | string | Date;
+  triggerType?: "scheduled" | "manual";
+  requestedBy?: string | null;
+}
+
+const PIPELINE_LOCK_KEY = "daily-research";
+const PIPELINE_LOCK_MS = 2 * 60 * 60 * 1000;
+
 function now(): string {
   return new Date().toISOString();
 }
@@ -37,30 +46,67 @@ async function finishRun(runId: string, status: Exclude<DailyPipelineResult["sta
     aiPromptTokens: ai?.promptTokens ?? 0,
     aiCompletionTokens: ai?.completionTokens ?? 0,
   };
-  await getD1().prepare("UPDATE pipeline_runs SET finished_at = ?, status = ?, source_count = ?, source_success_count = ?, source_failure_count = ?, new_count = ?, ai_status = ?, ai_processed_count = ?, ai_failure_count = ?, error = ?, metrics_json = ? WHERE id = ?")
-    .bind(now(), status, sources.length, sourceSuccessCount, sourceFailureCount, newCount, ai?.status ?? "not_started", ai?.processedCount ?? 0, ai?.failureCount ?? 0, error, JSON.stringify(metrics), runId).run();
+  await getD1().batch([
+    getD1().prepare("UPDATE pipeline_runs SET finished_at = ?, status = ?, source_count = ?, source_success_count = ?, source_failure_count = ?, new_count = ?, ai_status = ?, ai_processed_count = ?, ai_failure_count = ?, error = ?, metrics_json = ? WHERE id = ?")
+      .bind(now(), status, sources.length, sourceSuccessCount, sourceFailureCount, newCount, ai?.status ?? "not_started", ai?.processedCount ?? 0, ai?.failureCount ?? 0, error, JSON.stringify(metrics), runId),
+    getD1().prepare("DELETE FROM pipeline_locks WHERE lock_key = ? AND run_id = ?").bind(PIPELINE_LOCK_KEY, runId),
+  ]);
   return { sourceSuccessCount, sourceFailureCount, newCount };
 }
 
-export async function runDailyResearchPipeline(scheduledFor?: number | string | Date): Promise<DailyPipelineResult> {
-  const scheduledAt = normalizedSchedule(scheduledFor);
-  const slotKey = `daily:${scheduledAt}`;
-  const runId = crypto.randomUUID();
-  const startedAt = now();
-  const inserted = await getD1().prepare("INSERT OR IGNORE INTO pipeline_runs (id, slot_key, scheduled_at, started_at, status) VALUES (?, ?, ?, ?, 'running')")
-    .bind(runId, slotKey, scheduledAt, startedAt).run();
-  if (Number(inserted.meta.changes ?? 0) !== 1) {
-    const existing = await getD1().prepare("SELECT id, status, source_count, source_success_count, source_failure_count, new_count FROM pipeline_runs WHERE slot_key = ?")
-      .bind(slotKey).first<Row>();
+function pipelineOptions(value?: number | string | Date | DailyPipelineOptions): Required<Omit<DailyPipelineOptions, "requestedBy">> & { requestedBy: string | null } {
+  if (value && typeof value === "object" && !(value instanceof Date)) {
     return {
-      runId: String(existing?.id ?? ""),
-      status: "duplicate",
-      sourceCount: Number(existing?.source_count ?? 0),
-      sourceSuccessCount: Number(existing?.source_success_count ?? 0),
-      sourceFailureCount: Number(existing?.source_failure_count ?? 0),
-      newCount: Number(existing?.new_count ?? 0),
-      ai: null,
+      scheduledFor: value.scheduledFor ?? new Date(),
+      triggerType: value.triggerType ?? "scheduled",
+      requestedBy: value.requestedBy?.trim() || null,
     };
+  }
+  return { scheduledFor: value ?? new Date(), triggerType: "scheduled", requestedBy: null };
+}
+
+async function duplicateResult(runId: string): Promise<DailyPipelineResult> {
+  const existing = await getD1().prepare("SELECT id, source_count, source_success_count, source_failure_count, new_count FROM pipeline_runs WHERE id = ?")
+    .bind(runId).first<Row>();
+  return {
+    runId: String(existing?.id ?? runId),
+    status: "duplicate",
+    sourceCount: Number(existing?.source_count ?? 0),
+    sourceSuccessCount: Number(existing?.source_success_count ?? 0),
+    sourceFailureCount: Number(existing?.source_failure_count ?? 0),
+    newCount: Number(existing?.new_count ?? 0),
+    ai: null,
+  };
+}
+
+export async function runDailyResearchPipeline(input?: number | string | Date | DailyPipelineOptions): Promise<DailyPipelineResult> {
+  const options = pipelineOptions(input);
+  const scheduledAt = normalizedSchedule(options.scheduledFor);
+  const runId = crypto.randomUUID();
+  const slotKey = options.triggerType === "manual" ? `manual:${runId}` : `daily:${scheduledAt}`;
+  const startedAt = now();
+  const expiresAt = new Date(Date.parse(startedAt) + PIPELINE_LOCK_MS).toISOString();
+  const acquired = await getD1().prepare("INSERT INTO pipeline_locks (lock_key, run_id, acquired_at, expires_at) VALUES (?, ?, ?, ?) ON CONFLICT(lock_key) DO UPDATE SET run_id = excluded.run_id, acquired_at = excluded.acquired_at, expires_at = excluded.expires_at WHERE pipeline_locks.expires_at <= excluded.acquired_at")
+    .bind(PIPELINE_LOCK_KEY, runId, startedAt, expiresAt).run();
+  if (Number(acquired.meta.changes ?? 0) !== 1) {
+    const active = await getD1().prepare("SELECT run_id FROM pipeline_locks WHERE lock_key = ?").bind(PIPELINE_LOCK_KEY).first<{ run_id: string }>();
+    return duplicateResult(String(active?.run_id ?? "active-pipeline"));
+  }
+  await getD1().prepare("UPDATE pipeline_runs SET status = 'failed', finished_at = ?, error = COALESCE(error, 'Recovered after an expired pipeline lock.') WHERE status = 'running' AND id != ? AND started_at < ?")
+    .bind(startedAt, runId, startedAt).run();
+
+  let inserted: D1Result<unknown>;
+  try {
+    inserted = await getD1().prepare("INSERT OR IGNORE INTO pipeline_runs (id, slot_key, scheduled_at, trigger_type, requested_by, started_at, status) VALUES (?, ?, ?, ?, ?, ?, 'running')")
+      .bind(runId, slotKey, scheduledAt, options.triggerType, options.requestedBy, startedAt).run();
+  } catch (error) {
+    await getD1().prepare("DELETE FROM pipeline_locks WHERE lock_key = ? AND run_id = ?").bind(PIPELINE_LOCK_KEY, runId).run();
+    throw error;
+  }
+  if (Number(inserted.meta.changes ?? 0) !== 1) {
+    await getD1().prepare("DELETE FROM pipeline_locks WHERE lock_key = ? AND run_id = ?").bind(PIPELINE_LOCK_KEY, runId).run();
+    const existing = await getD1().prepare("SELECT id FROM pipeline_runs WHERE slot_key = ?").bind(slotKey).first<{ id: string }>();
+    return duplicateResult(String(existing?.id ?? runId));
   }
 
   let sources: FetchSourceResult[] = [];

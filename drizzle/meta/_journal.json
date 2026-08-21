@@ -15,6 +15,13 @@
       "when": 1787215510318,
       "tag": "0001_numerous_pestilence",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1787217480280,
+      "tag": "0002_special_brood",
+      "breakpoints": true
     }
   ]
 }

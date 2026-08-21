@@ -190,6 +190,8 @@ export const pipelineRuns = sqliteTable(
     id: text("id").primaryKey(),
     slotKey: text("slot_key").notNull(),
     scheduledAt: text("scheduled_at").notNull(),
+    triggerType: text("trigger_type").notNull().default("scheduled"),
+    requestedBy: text("requested_by"),
     startedAt: text("started_at").notNull(),
     finishedAt: text("finished_at"),
     status: text("status").notNull().default("running"),
@@ -207,4 +209,15 @@ export const pipelineRuns = sqliteTable(
     uniqueIndex("idx_pipeline_runs_slot_key").on(table.slotKey),
     index("idx_pipeline_runs_scheduled").on(table.scheduledAt),
   ],
+);
+
+export const pipelineLocks = sqliteTable(
+  "pipeline_locks",
+  {
+    lockKey: text("lock_key").primaryKey(),
+    runId: text("run_id").notNull(),
+    acquiredAt: text("acquired_at").notNull(),
+    expiresAt: text("expires_at").notNull(),
+  },
+  (table) => [index("idx_pipeline_locks_expires").on(table.expiresAt)],
 );
