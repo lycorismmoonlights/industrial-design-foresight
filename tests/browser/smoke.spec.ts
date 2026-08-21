@@ -19,7 +19,15 @@ test("owner research flow persists in D1 and remains usable on mobile", async ({
   await page.getByRole("button", { name: "添加为停用状态", exact: true }).click();
   await expect(page.getByText(sourceName, { exact: true })).toBeVisible();
   await page.reload();
-  await expect(page.getByText(sourceName, { exact: true })).toBeVisible();
+  await expect(page.locator("strong", { hasText: sourceName }).filter({ hasText: sourceName })).toBeVisible();
+
+  await page.getByRole("button", { name: "自动化运营", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "API 与抓取数据运营台", exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "接口就绪状态", exact: true })).toBeVisible();
+  await expect(page.locator("strong", { hasText: sourceName })).toBeVisible();
+  await page.getByRole("button", { name: "配置", exact: true }).last().click();
+  await expect(page.getByRole("button", { name: "保存配置", exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "取消", exact: true }).click();
 
   await page.setViewportSize({ width: 390, height: 844 });
   await expect(page.getByRole("button", { name: "打开菜单", exact: true })).toBeVisible();
@@ -46,6 +54,8 @@ test("business API rejects anonymous and non-owner requests", async () => {
   });
   expect((await anonymous.get("/api/bootstrap")).status()).toBe(401);
   expect((await nonOwner.get("/api/bootstrap")).status()).toBe(403);
+  expect((await anonymous.get("/api/operations")).status()).toBe(401);
+  expect((await nonOwner.get("/api/operations")).status()).toBe(403);
   await anonymous.dispose();
   await nonOwner.dispose();
 });

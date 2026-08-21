@@ -37,6 +37,7 @@ import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { demoStore, scenarioPresets } from "../demo-data";
 import { useResearchData, type InitialUser } from "../hooks/useResearchData";
 import { EvidenceView, InboxView, SourcesView, WeeklyView } from "./ResearchOperations";
+import { AutomationOperations } from "./AutomationOperations";
 import {
   calculatePhase,
   phaseMeta,
@@ -64,6 +65,7 @@ const NAV: Array<{ id: ViewId; label: string; icon: LucideIcon; group?: string }
   { id: "opportunities", label: "机会库", icon: BriefcaseBusiness },
   { id: "discussions", label: "讨论与决策", icon: MessageSquareText, group: "协作与维护" },
   { id: "weekly", label: "每周研究", icon: RefreshCcw, group: "资料与证据" },
+  { id: "operations", label: "自动化运营", icon: Gauge },
   { id: "sources", label: "来源管理", icon: Rss },
   { id: "inbox", label: "待审核箱", icon: Inbox },
   { id: "evidence", label: "证据库", icon: ShieldCheck },
@@ -78,7 +80,8 @@ const VIEW_COPY: Record<ViewId, { eyebrow: string; title: string; description: s
   opportunities: { eyebrow: "进入准备", title: "机会窗口库", description: "分别管理现在、危机期和复苏窗口的进入条件，避免把趋势等同于机会。" },
   discussions: { eyebrow: "研究协作", title: "讨论与决策", description: "区分开放讨论、反方证据和正式决定，让研究过程可追溯。" },
   weekly: { eyebrow: "研究节奏", title: "每周研究面板", description: "用固定节奏维护来源、证据、能力动作和机会触发器，避免只收藏、不判断。" },
-  sources: { eyebrow: "资料发现", title: "来源管理", description: "管理 RSS / Atom 和人工来源；启用前确认，抓取失败彼此隔离。" },
+  operations: { eyebrow: "自动化应用层", title: "API 与抓取数据运营台", description: "统一管理接口就绪状态、来源参数、管线运行和抓取数据，不向浏览器暴露密钥。" },
+  sources: { eyebrow: "资料发现", title: "来源管理", description: "管理 RSS / Atom、官方 API 和人工来源；启用前确认，抓取失败彼此隔离。" },
   inbox: { eyebrow: "人工审核", title: "待审核箱", description: "拒绝、忽略或转为信号草稿；未发布草稿不会出现在行业雷达。" },
   evidence: { eyebrow: "证据链", title: "证据库", description: "记录来源类别、可信度、相关度和立场；分值只作提示，不替你判断。" },
   data: { eyebrow: "云端数据", title: "记录、历史与备份", description: "D1 保存全部研究记录与版本；浏览器只保留界面偏好。" },
@@ -255,7 +258,7 @@ export function ForesightApp({ initialUser }: { initialUser: InitialUser }) {
         </nav>
         <div className="sidebar-bottom">
           <div className="local-status"><ShieldCheck size={16} /><div><strong>私有云端模式</strong><span>{research.data.user.email}</span></div></div>
-          <div className="version-line"><span>PERSONAL v0.3</span><a href="/signout-with-chatgpt?return_to=/">退出</a></div>
+          <div className="version-line"><span>PERSONAL v0.4</span><a href="/signout-with-chatgpt?return_to=/">退出</a></div>
         </div>
       </aside>
 
@@ -291,6 +294,7 @@ export function ForesightApp({ initialUser }: { initialUser: InitialUser }) {
           {activeView === "opportunities" && <OpportunityView opportunities={store.opportunities} updateStatus={updateOpportunity} openAdd={() => setModalType("opportunity")} />}
           {activeView === "discussions" && <DiscussionView discussions={store.discussions} convertDecision={convertDecision} openAdd={() => setModalType("discussion")} />}
           {activeView === "weekly" && <WeeklyView research={research} navigate={navigate} notify={(action, success) => void run(action, success)} />}
+          {activeView === "operations" && <AutomationOperations research={research} notify={(action, success) => void run(action, success)} />}
           {activeView === "sources" && <SourcesView research={research} notify={(action, success) => void run(action, success)} />}
           {activeView === "inbox" && <InboxView research={research} notify={(action, success) => void run(action, success)} />}
           {activeView === "evidence" && <EvidenceView research={research} notify={(action, success) => void run(action, success)} />}
