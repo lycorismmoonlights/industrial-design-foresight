@@ -176,9 +176,13 @@ export function useResearchData(initialUser: InitialUser) {
   }
 
   async function fetchSource(id: string) {
-    const result = await apiRequest<{ sourceId: string; status: string; newCount: number; durationMs: number }>(`/api/sources/${encodeURIComponent(id)}/fetch`, { method: "POST" });
-    await refresh();
-    return result;
+    try {
+      return await apiRequest<{ sourceId: string; status: string; newCount: number; durationMs: number }>(`/api/sources/${encodeURIComponent(id)}/fetch`, { method: "POST" });
+    } finally {
+      // Failed adapters still persist a sync run and source error on the server.
+      // Refresh in both outcomes so the diagnostics update without a page reload.
+      await refresh();
+    }
   }
 
   async function reviewInbox(id: string, input: {
@@ -208,6 +212,7 @@ export function useResearchData(initialUser: InitialUser) {
 
   return {
     data: data ?? { user: initialUser, records: [], sources: [], inboxStats: { pending: 0, reviewed: 0 }, inboxItems: [], evidence: [], settings: {} },
+    initialized: data !== null,
     records,
     store,
     loading,

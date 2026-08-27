@@ -1,9 +1,12 @@
 "use client";
 
-import { Activity, Check, ExternalLink, FileSearch, Inbox, Link2, Plus, RefreshCcw, Rss, ShieldAlert, Target } from "lucide-react";
-import { FormEvent, useMemo, useState } from "react";
+import { Activity, AlertTriangle, Check, CircleCheck, Clock3, Database, ExternalLink, FileSearch, Globe2, HelpCircle, Inbox, KeyRound, Link2, Plus, RefreshCcw, Rss, Search, Settings2, SlidersHorizontal, Target, X } from "lucide-react";
+import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
+import { apiRequest } from "../data/api-client";
 import type { useResearchData } from "../hooks/useResearchData";
+import type { OperationsOverviewDto } from "../operations-model";
 import type { EvidenceDto, InboxItemDto, SourceDto } from "../v2-model";
+import { SourceEditor } from "./SourceEditor";
 
 type Research = ReturnType<typeof useResearchData>;
 type Notify = (action: () => Promise<unknown>, success: string) => void;
@@ -35,44 +38,187 @@ const SOURCE_PRESETS = [
   },
 ] as const;
 
-function SourceHealth({ source }: { source: SourceDto }) {
-  const tone = source.lastError ? "bad" : source.lastSuccessAt ? "good" : "idle";
-  const label = source.lastError ? "异常" : source.lastSuccessAt ? "正常" : "未同步";
-  return <span className={`health-chip ${tone}`}><i />{label}</span>;
+type SourceFilter = "all" | "attention" | "disabled";
+type AddSourceMode = "preset" | "feed" | "api" | "page";
+type ApiAdapter = "bls" | "fred" | "sec" | "eurostat";
+
+const ADAPTER_LABELS: Record<SourceDto["adapterType"], string> = {
+  rss: "RSS",
+  bls: "BLS API",
+  fred: "FRED API",
+  sec: "SEC API",
+  eurostat: "Eurostat API",
+  manual: "网页",
+};
+
+const CATEGORY_LABELS: Record<string, string> = {
+  industry_media: "行业媒体",
+  government: "政府与监管",
+  intergovernmental: "国际组织",
+  economic_data: "经济数据",
+  corporate_filings: "企业披露",
+};
+
+const RUNTIME_REQUIREMENTS: Partial<Record<SourceDto["adapterType"], { key: string; action: string }>> = {
+  fred: { key: "FRED_API_KEY", action: "配置 API 密钥" },
+  sec: { key: "SEC_USER_AGENT", action: "配置联系标识" },
+};
+
+function sourceState(source: SourceDto) {
+  if (!source.enabled) return { key: "disabled", label: "已停用" } as const;
+  if (source.lastError) return { key: "attention", label: "需要处理" } as const;
+  if (source.lastSuccessAt) return { key: "healthy", label: "正常" } as const;
+  return { key: "idle", label: "待测试" } as const;
+}
+
+function formatSourceTime(value: string | null): string {
+  if (!value) return "尚未运行";
+  return new Intl.DateTimeFormat("zh-CN", {
+    timeZone: "Asia/Shanghai",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).format(new Date(value));
+}
+
+function SourceStatus({ source }: { source: SourceDto }) {
+  const state = sourceState(source);
+  return <span className={`source-state ${state.key}`}><i />{state.label}</span>;
+}
+
+function adapterConfig(adapter: ApiAdapter, identifier: string, label: string): Record<string, unknown> {
+  if (adapter === "bls" || adapter === "fred") return { series: [{ id: identifier, label }] };
+  if (adapter === "sec") return { companies: [{ cik: identifier, name: label }], forms: ["10-K", "10-Q", "8-K"] };
+  return { queries: [{ dataset: identifier, label, filters: {} }] };
+}
+
+function AddSourceDialog({ research, notify, close, created }: {
+  research: Research;
+  notify: Notify;
+  close: () => void;
+  created: (sourceId: string) => void;
+}) {
+  const [mode, setMode] = useState<AddSourceMode>("preset");
+  const [name, setName] = useState("");
+  const [url, setUrl] = useState("");
+  const [adapter, setAdapter] = useState<ApiAdapter>("fred");
+  const [identifier, setIdentifier] = useState("");
+
+  function finish(action: () => Promise<SourceDto>, message: string) {
+    notify(() => action().then((source) => { created(source.id); close(); }), message);
+  }
+
+  function submit(event: FormEvent) {
+    event.preventDefault();
+    if (mode === "feed" || mode === "page") {
+      finish(() => research.createSource({ name, ...(mode === "feed" ? { feedUrl: url } : { pageUrl: url }), enabled: false }), "来源已添加，请先测试连接再启用");
+      return;
+    }
+    finish(() => research.createSource({
+      name,
+      adapterType: adapter,
+      adapterConfig: adapterConfig(adapter, identifier.trim(), name.trim()),
+      sourceCategory: adapter === "sec" ? "corporate_filings" : adapter === "eurostat" ? "government" : "economic_data",
+      enabled: false,
+    }), "API 来源已添加，请先测试连接再启用");
+  }
+
+  return <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) close(); }}>
+    <section className="modal-card add-source-dialog" role="dialog" aria-modal="true" aria-labelledby="add-source-title">
+      <div className="modal-head"><div><p className="eyebrow">ADD SOURCE</p><h2 id="add-source-title">添加来源</h2><span>选择一种方式，系统会在启用前让你测试连接。</span></div><button type="button" onClick={close} aria-label="关闭添加来源"><X size={16} /></button></div>
+      <div className="source-method-tabs" role="tablist" aria-label="添加来源方式">
+        {(["preset", "feed", "api", "page"] as const).map((value) => <button key={value} type="button" role="tab" aria-selected={mode === value} className={mode === value ? "active" : ""} onClick={() => setMode(value)}>{value === "preset" ? "推荐来源" : value === "feed" ? "RSS 订阅" : value === "api" ? "官方数据 API" : "普通网页"}</button>)}
+      </div>
+      {mode === "preset" ? <div className="source-preset-list">{SOURCE_PRESETS.map((preset) => <article key={preset.name}><div><strong>{preset.name}</strong><p>{preset.note}</p></div><button type="button" className="button secondary compact" onClick={() => finish(() => research.createSource({ ...preset, enabled: false }), `${preset.name} 已添加，请先测试连接`)}>添加</button></article>)}</div> : <form onSubmit={submit}>
+        <label className="form-field"><span>来源名称</span><input required value={name} onChange={(event) => setName(event.target.value)} placeholder="例如：制造业就业指标" /></label>
+        {mode === "api" && <label className="form-field"><span>官方 API</span><select value={adapter} onChange={(event) => { setAdapter(event.target.value as ApiAdapter); setIdentifier(""); }}><option value="fred">FRED 经济数据</option><option value="bls">BLS 劳工统计</option><option value="sec">SEC 企业披露</option><option value="eurostat">Eurostat 欧盟统计</option></select></label>}
+        {mode === "feed" || mode === "page" ? <label className="form-field"><span>{mode === "feed" ? "RSS / Atom 地址" : "网页地址"}</span><input required type="url" value={url} onChange={(event) => setUrl(event.target.value)} placeholder="https://" /></label> : <label className="form-field"><span>{adapter === "sec" ? "公司 CIK" : adapter === "eurostat" ? "数据集代码" : "数据系列 ID"}</span><input required value={identifier} onChange={(event) => setIdentifier(event.target.value)} placeholder={adapter === "sec" ? "例如：320193" : adapter === "eurostat" ? "例如：nama_10_a64" : "例如：PAYEMS"} /><small>{RUNTIME_REQUIREMENTS[adapter] ? `${RUNTIME_REQUIREMENTS[adapter]?.key} 必须在站点运行时配置，页面不会保存密钥。` : "如使用 BLS 密钥，也应放在站点运行时配置中。"}</small></label>}
+        <div className="add-source-safety"><CircleCheck size={15} /><span>新来源先保存为停用状态；测试成功后再加入每天零点的自动抓取。</span></div>
+        <div className="modal-actions"><button type="button" className="button ghost" onClick={close}>取消</button><button className="button primary" type="submit">添加并去测试</button></div>
+      </form>}
+    </section>
+  </div>;
 }
 
 export function SourcesView({ research, notify }: { research: Research; notify: Notify }) {
-  const [name, setName] = useState("");
-  const [url, setUrl] = useState("");
-  const [config, setConfig] = useState("{}");
-  const [mode, setMode] = useState<"feed" | "page" | "bls" | "fred" | "sec" | "eurostat">("feed");
-  function add(event: FormEvent) {
-    event.preventDefault();
-    if (mode === "feed" || mode === "page") {
-      notify(() => research.createSource({ name, ...(mode === "feed" ? { feedUrl: url } : { pageUrl: url }) }).then(() => { setName(""); setUrl(""); }), "来源已加入，启用前不会自动抓取");
-      return;
-    }
-    let adapterConfig: Record<string, unknown>;
-    try {
-      adapterConfig = JSON.parse(config) as Record<string, unknown>;
-    } catch {
-      window.alert("适配器配置必须是有效 JSON。");
-      return;
-    }
-    notify(() => research.createSource({ name, adapterType: mode, adapterConfig }).then(() => { setName(""); setConfig("{}"); }), "API 来源已加入，启用前不会自动抓取");
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [query, setQuery] = useState("");
+  const [filter, setFilter] = useState<SourceFilter>("all");
+  const [addOpen, setAddOpen] = useState(false);
+  const [editOpen, setEditOpen] = useState(false);
+  const [runtimeHelp, setRuntimeHelp] = useState<{ key: string; action: string } | null>(null);
+  const [testingId, setTestingId] = useState<string | null>(null);
+  const [overview, setOverview] = useState<OperationsOverviewDto | null>(null);
+
+  const loadOverview = useCallback(async () => {
+    try { setOverview(await apiRequest<OperationsOverviewDto>("/api/operations")); } catch { setOverview(null); }
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    apiRequest<OperationsOverviewDto>("/api/operations")
+      .then((nextOverview) => { if (active) setOverview(nextOverview); })
+      .catch(() => { if (active) setOverview(null); });
+    return () => { active = false; };
+  }, []);
+
+  const sources = research.data.sources;
+  const selected = sources.find((source) => source.id === selectedId) ?? sources.find((source) => source.lastError && source.enabled) ?? sources[0] ?? null;
+  const filtered = useMemo(() => sources.filter((source) => {
+    const state = sourceState(source);
+    const matchesFilter = filter === "all" || (filter === "attention" && (state.key === "attention" || state.key === "idle")) || (filter === "disabled" && state.key === "disabled");
+    const normalized = query.trim().toLocaleLowerCase("zh-CN");
+    return matchesFilter && (!normalized || `${source.name} ${source.adapterType} ${source.sourceCategory}`.toLocaleLowerCase("zh-CN").includes(normalized));
+  }), [filter, query, sources]);
+  const healthyCount = sources.filter((source) => sourceState(source).key === "healthy").length;
+  const attentionCount = sources.filter((source) => ["attention", "idle"].includes(sourceState(source).key)).length;
+  const selectedRuns = overview?.syncRuns.filter((run) => run.sourceId === selected?.id).slice(0, 5) ?? [];
+
+  function testSource(source: SourceDto) {
+    notify(async () => {
+      setTestingId(source.id);
+      try { await research.fetchSource(source.id); } finally { await loadOverview(); setTestingId(null); }
+    }, "连接测试完成");
   }
-  function addPreset(preset: typeof SOURCE_PRESETS[number]) {
-    if (!window.confirm(`确认添加并启用“${preset.name}”？启用后每天 00:00 抓取元数据，正式研究判断仍需人工审核。`)) return;
-    notify(() => research.createSource({ ...preset, enabled: true, confirmEnable: true }), `${preset.name} 已确认启用`);
+
+  function toggleSource(source: SourceDto) {
+    if (!source.enabled && !window.confirm(`确认启用“${source.name}”？启用后会进入每天零点的自动抓取。`)) return;
+    notify(() => research.updateSource(source.id, { enabled: !source.enabled }, !source.enabled).then(loadOverview), source.enabled ? "来源已停用" : "来源已启用");
   }
-  return <div className="view-stack">
-    <section className="ops-intro"><Rss size={22} /><div><h2>订阅只是资料发现层</h2><p>只保存标题、摘要、作者、日期和原文链接；不抓全文或图片。任何条目都必须经你审核，才可成为信号草稿。</p></div></section>
-    <section className="panel ops-panel"><div className="panel-title"><div><p>CURATED STARTERS</p><h2>建议来源预设</h2></div></div><div className="preset-grid">{SOURCE_PRESETS.map((preset) => <article key={preset.name}><strong>{preset.name}</strong><p>{preset.note}</p><button className="button secondary compact" onClick={() => addPreset(preset)}>确认并启用</button></article>)}</div></section>
-    <section className="two-column equal">
-      <form className="panel ops-form" onSubmit={add}><div className="panel-title"><div><p>ADD SOURCE</p><h2>添加订阅、网页或官方 API</h2></div></div><label className="form-field"><span>来源名称</span><input required value={name} onChange={(event) => setName(event.target.value)} /></label><label className="form-field"><span>来源类型</span><select value={mode} onChange={(event) => setMode(event.target.value as typeof mode)}><option value="feed">直接 RSS / Atom</option><option value="page">网页自动发现</option><option value="bls">BLS API</option><option value="fred">FRED API</option><option value="sec">SEC EDGAR API</option><option value="eurostat">Eurostat API</option></select></label>{mode === "feed" || mode === "page" ? <label className="form-field"><span>{mode === "feed" ? "订阅地址" : "网页地址"}</span><input required type="url" value={url} onChange={(event) => setUrl(event.target.value)} placeholder="https://" /></label> : <label className="form-field"><span>适配器配置 JSON</span><textarea required className="json-editor" value={config} onChange={(event) => setConfig(event.target.value)} spellCheck={false} /><small>这里只填写系列、CIK 或数据集参数；密钥必须放入运行时环境变量。</small></label>}<button className="button primary" type="submit"><Plus size={15} />添加为停用状态</button></form>
-      <section className="panel ops-panel"><div className="panel-title"><div><p>SAFETY BOUNDARY</p><h2>抓取限制</h2></div></div><ul className="plain-checks"><li><ShieldAlert size={15} />拒绝私网、本机和非 HTTP(S) 地址</li><li><Activity size={15} />10 秒超时、1 MB 响应、单次最多 100 条</li><li><RefreshCcw size={15} />ETag / Last-Modified 条件请求与三级去重</li></ul></section>
+
+  return <div className="view-stack source-management">
+    <section className="source-summary-bar">
+      <div><strong>{sources.length}</strong><span>个来源</span></div><i />
+      <div className="healthy"><strong>{healthyCount}</strong><span>个正常</span></div><i />
+      <div className={attentionCount ? "attention" : "healthy"}><strong>{attentionCount}</strong><span>个需要处理</span></div>
+      <button className="button primary" type="button" onClick={() => setAddOpen(true)}><Plus size={15} />添加来源</button>
     </section>
-    <section className="panel ops-panel"><div className="panel-title"><div><p>SOURCE HEALTH</p><h2>来源状态</h2></div><span className="count-chip">{research.data.sources.length} 个</span></div>{research.data.sources.length === 0 ? <p className="empty-note">尚未添加来源。</p> : <div className="source-list">{research.data.sources.map((source) => <article key={source.id}><div><SourceHealth source={source} /><strong>{source.name}</strong><small>{source.feedUrl ?? source.pageUrl ?? `${source.adapterType.toUpperCase()} API`}</small></div><div className="source-metrics"><span>新增 {source.lastNewCount}</span><span>{source.lastDurationMs === null ? "未计时" : `${source.lastDurationMs} ms`}</span></div><div className="record-actions"><button onClick={() => { if (source.enabled || window.confirm(`确认启用“${source.name}”？`)) notify(() => research.updateSource(source.id, { enabled: !source.enabled }, !source.enabled), source.enabled ? "来源已停用" : "来源已启用"); }}>{source.enabled ? "停用" : "启用"}</button><button disabled={source.adapterType === "manual"} onClick={() => notify(() => research.fetchSource(source.id), "手动同步完成")}>同步</button>{(source.feedUrl || source.pageUrl) && <a href={source.feedUrl ?? source.pageUrl ?? "#"} target="_blank" rel="noreferrer" aria-label="打开来源"><ExternalLink size={14} /></a>}</div>{source.lastError && <p className="source-error">{source.lastError}</p>}</article>)}</div>}</section>
+
+    <section className="panel source-workspace">
+      <aside className="source-master">
+        <div className="source-master-tools"><label><Search size={15} /><span className="visually-hidden">搜索来源</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索来源…" /></label><SlidersHorizontal size={16} /></div>
+        <div className="source-filter-tabs">{(["all", "attention", "disabled"] as const).map((value) => <button key={value} type="button" className={filter === value ? "active" : ""} onClick={() => setFilter(value)}>{value === "all" ? "全部" : value === "attention" ? "需处理" : "已停用"}</button>)}</div>
+        <div className="source-master-list">{filtered.length ? filtered.map((source) => <button type="button" key={source.id} className={selected?.id === source.id ? "selected" : ""} onClick={() => setSelectedId(source.id)}><div><strong>{source.name}</strong><span>{ADAPTER_LABELS[source.adapterType]}</span></div><SourceStatus source={source} /></button>) : <div className="source-list-empty"><Search size={18} /><p>没有符合条件的来源</p></div>}</div>
+        <footer>显示 {filtered.length} / {sources.length} 个来源</footer>
+      </aside>
+
+      <div className="source-detail">{selected ? <>
+        <header className="source-detail-head"><div><div><span className="adapter-chip">{ADAPTER_LABELS[selected.adapterType]}</span><SourceStatus source={selected} /></div><h2>{selected.name}</h2><p>{selected.feedUrl ?? selected.pageUrl ?? `${CATEGORY_LABELS[selected.sourceCategory] ?? selected.sourceCategory} · 官方结构化数据来源`}</p></div>{(selected.feedUrl || selected.pageUrl) && <div className="record-actions"><a href={selected.feedUrl ?? selected.pageUrl ?? "#"} target="_blank" rel="noreferrer" aria-label="打开来源网站"><ExternalLink size={14} /></a></div>}</header>
+        <section className="source-detail-overview">
+          <dl><div><dt><Activity size={14} />当前状态</dt><dd><SourceStatus source={selected} /></dd></div><div><dt><Clock3 size={14} />最近运行</dt><dd>{formatSourceTime(selected.lastFetchAt)}</dd></div><div><dt><RefreshCcw size={14} />运行频率</dt><dd>{selected.cadence === "daily" ? "每天 00:00" : selected.cadence === "weekly" ? "每周" : "每月"}</dd></div><div><dt><Database size={14} />每次抓取上限</dt><dd>{selected.maxItemsPerRun} 条</dd></div><div><dt><Globe2 size={14} />类别</dt><dd>{CATEGORY_LABELS[selected.sourceCategory] ?? selected.sourceCategory}</dd></div><div><dt><Check size={14} />默认可信度</dt><dd>{selected.defaultCredibility} / 5</dd></div></dl>
+          <div className="source-diagnostic">{selected.lastError ? <><span>最近错误 · {formatSourceTime(selected.lastFetchAt)}</span><div><AlertTriangle size={18} /><p><strong>{selected.lastError}</strong><small>修复配置后重新测试；其他来源不会受到影响。</small></p></div></> : selected.lastSuccessAt ? <><span>连接诊断</span><div className="success"><CircleCheck size={18} /><p><strong>最近一次抓取成功</strong><small>新增 {selected.lastNewCount} 条，耗时 {selected.lastDurationMs ?? 0} ms。</small></p></div></> : <><span>连接诊断</span><div className="idle"><Clock3 size={18} /><p><strong>尚未完成连接测试</strong><small>点击“测试连接”验证地址和参数，再决定是否启用。</small></p></div></>}</div>
+        </section>
+        <div className="source-detail-actions">{RUNTIME_REQUIREMENTS[selected.adapterType] && selected.lastError && <button type="button" className="button primary" onClick={() => setRuntimeHelp(RUNTIME_REQUIREMENTS[selected.adapterType] ?? null)}><KeyRound size={14} />{RUNTIME_REQUIREMENTS[selected.adapterType]?.action}</button>}<button type="button" className={RUNTIME_REQUIREMENTS[selected.adapterType] && selected.lastError ? "button secondary" : "button primary"} disabled={selected.adapterType === "manual" || testingId === selected.id} onClick={() => testSource(selected)}><RefreshCcw size={14} />{testingId === selected.id ? "测试中…" : "测试连接"}</button><button type="button" className="button secondary" onClick={() => setEditOpen(true)}><Settings2 size={14} />编辑设置</button><button type="button" className="button danger-outline" onClick={() => toggleSource(selected)}>{selected.enabled ? "停用来源" : "启用来源"}</button></div>
+        <section className="source-run-history"><div><h3>最近运行记录</h3><span>{selectedRuns.length ? `最近 ${selectedRuns.length} 次` : "尚无运行记录"}</span></div>{selectedRuns.length ? <div className="source-run-table">{selectedRuns.map((run) => <article key={run.id}><time>{formatSourceTime(run.startedAt)}</time><span className={`run-status ${run.status}`}>{run.status === "success" ? "成功" : run.status === "not_modified" ? "未变化" : "失败"}</span><span>{run.newCount} 条</span><span>{run.durationMs} ms</span></article>)}</div> : <div className="source-run-empty"><Clock3 size={18} /><p>测试一次连接后，这里会显示抓取结果和耗时。</p></div>}</section>
+        <footer className="source-detail-help"><HelpCircle size={14} /><span>来源状态由最近一次抓取结果决定。先修复配置，再运行测试。</span></footer>
+      </> : <div className="source-empty-workspace"><Rss size={24} /><h2>还没有来源</h2><p>添加一个推荐来源，或连接 RSS、官方 API 和普通网页。</p><button className="button primary" type="button" onClick={() => setAddOpen(true)}>添加第一个来源</button></div>}</div>
+    </section>
+
+    {addOpen && <AddSourceDialog research={research} notify={notify} close={() => setAddOpen(false)} created={setSelectedId} />}
+    {selected && editOpen && <div className="modal-backdrop" role="presentation"><section className="modal-card source-edit-dialog" role="dialog" aria-modal="true" aria-labelledby="edit-source-title"><div className="modal-head"><div><p className="eyebrow">SOURCE SETTINGS</p><h2 id="edit-source-title">编辑 {selected.name}</h2></div><button type="button" onClick={() => setEditOpen(false)} aria-label="关闭来源设置"><X size={16} /></button></div><SourceEditor key={selected.updatedAt} source={selected} cancel={() => setEditOpen(false)} save={(patch, confirmEnable) => notify(() => research.updateSource(selected.id, patch, confirmEnable).then(async () => { setEditOpen(false); await loadOverview(); }), "来源配置已保存")} /></section></div>}
+    {runtimeHelp && <div className="modal-backdrop" role="presentation"><section className="confirm-card runtime-help-dialog" role="dialog" aria-modal="true" aria-labelledby="runtime-help-title"><div className="confirm-icon"><KeyRound size={21} /></div><h2 id="runtime-help-title">{runtimeHelp.action}</h2><p>为避免密钥泄露，浏览器不会读取或保存密钥。请在站点运行时变量中设置：</p><code>{runtimeHelp.key}</code><p>保存运行时配置后，回到这里点击“测试连接”。</p><div className="modal-actions"><button className="button primary" type="button" onClick={() => setRuntimeHelp(null)}>我知道了</button></div></section></div>}
   </div>;
 }
 

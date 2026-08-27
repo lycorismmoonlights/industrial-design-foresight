@@ -81,7 +81,7 @@ const VIEW_COPY: Record<ViewId, { eyebrow: string; title: string; description: s
   discussions: { eyebrow: "研究协作", title: "讨论与决策", description: "区分开放讨论、反方证据和正式决定，让研究过程可追溯。" },
   weekly: { eyebrow: "研究节奏", title: "每周研究面板", description: "用固定节奏维护来源、证据、能力动作和机会触发器，避免只收藏、不判断。" },
   operations: { eyebrow: "自动化应用层", title: "API 与抓取数据运营台", description: "统一管理接口就绪状态、来源参数、管线运行和抓取数据，不向浏览器暴露密钥。" },
-  sources: { eyebrow: "资料发现", title: "来源管理", description: "管理 RSS / Atom、官方 API 和人工来源；启用前确认，抓取失败彼此隔离。" },
+  sources: { eyebrow: "资料发现", title: "来源管理", description: "查看每个来源的状态、修复连接问题，并控制每天自动收集的信息渠道。" },
   inbox: { eyebrow: "人工审核", title: "待审核箱", description: "拒绝、忽略或转为信号草稿；未发布草稿不会出现在行业雷达。" },
   evidence: { eyebrow: "证据链", title: "证据库", description: "记录来源类别、可信度、相关度和立场；分值只作提示，不替你判断。" },
   data: { eyebrow: "云端数据", title: "记录、历史与备份", description: "D1 保存全部研究记录与版本；浏览器只保留界面偏好。" },
@@ -227,7 +227,7 @@ export function ForesightApp({ initialUser }: { initialUser: InitialUser }) {
     await run(() => research.createLegacy(kind, value), "记录已保存到云端");
   }
 
-  if (research.loading && !research.records.length) {
+  if (research.loading && !research.initialized) {
     return <main className="loading-page"><Radar size={28} /><p>正在连接私有研究库…</p></main>;
   }
 
@@ -258,7 +258,7 @@ export function ForesightApp({ initialUser }: { initialUser: InitialUser }) {
         </nav>
         <div className="sidebar-bottom">
           <div className="local-status"><ShieldCheck size={16} /><div><strong>私有云端模式</strong><span>{research.data.user.email}</span></div></div>
-          <div className="version-line"><span>PERSONAL v0.4</span><a href="/signout-with-chatgpt?return_to=/">退出</a></div>
+          <div className="version-line"><span>PERSONAL v0.5</span><a href="/signout-with-chatgpt?return_to=/">退出</a></div>
         </div>
       </aside>
 
