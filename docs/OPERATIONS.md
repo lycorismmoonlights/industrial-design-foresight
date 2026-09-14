@@ -1,4 +1,4 @@
-# v0.2 私有研究版运行手册
+# v0.5 自动化运营与来源管理运行手册
 
 ## 部署前
 
@@ -6,6 +6,7 @@
 2. 在部署环境交互式设置 `OWNER_EMAIL`；它必须与唯一所有者的 ChatGPT 登录邮箱一致。不要把邮箱、令牌或 Cloudflare 凭据提交到 Git。
 3. 确认 D1 绑定名为 `DB`，并在正式库应用 `drizzle/` 内的迁移。
 4. 生产库默认为空。首次登录后可导入 v1 JSON 或示例数据；同一原始文件只允许导入一次。
+5. 先保持 `AI_PROCESSING_ENABLED=false` 完成来源抓取验收，再配置 DeepSeek 密钥并启用 AI。
 
 本地首次启动或新增迁移后先运行：
 
@@ -30,15 +31,46 @@ pnpm wrangler d1 time-travel info YOUR_DATABASE
 pnpm wrangler d1 time-travel restore YOUR_DATABASE --bookmark=BOOKMARK
 ```
 
-## 订阅与 Cron
+## 来源与 Cron
 
-- Worker Cron：`30 0 * * *`，即北京时间每天 08:30。
+- Worker Cron：`0 16 * * *`，即北京时间每天 00:00；Cloudflare Cron 使用 UTC。
 - 本地开发可用 Cloudflare 的 scheduled handler 模拟能力；集成测试直接运行同一调度服务。
 - 新来源默认停用。首次启用必须在界面确认。
 - 只允许 HTTP/HTTPS；每来源 10 秒、1 MB、100 条，最多 3 次安全重定向。
 - 抓取保存元数据，不保存全文或图片。
 - ETag / Last-Modified 用于条件请求；GUID、规范 URL、内容哈希依次参与去重。
 - 单来源异常写入 `sync_runs` 和来源健康状态，不中断其他来源。
+- 同一个计划时间由 `pipeline_runs.slot_key` 去重，避免 Cron 重投导致整批重复执行。
+
+API 适配器配置与示例见 [`SOURCE_ADAPTERS.md`](SOURCE_ADAPTERS.md)。
+
+## DeepSeek
+
+本地把密钥写入被 Git 忽略的 `.env.local`，生产环境使用平台 secret store。推荐先设置：
+
+```text
+AI_PROCESSING_ENABLED=true
+AI_DAILY_ITEM_LIMIT=30
+AI_MAX_ATTEMPTS=3
+DEEPSEEK_MODEL=deepseek-v4-flash
+```
+
+然后单独设置 `DEEPSEEK_API_KEY`。FRED 需要 `FRED_API_KEY`；BLS 注册密钥是可选的；SEC 必须设置可识别应用和联系地址的 `SEC_USER_AGENT`。
+
+AI 只写入待审核条目的建议字段。它不会创建正式信号、不会发布记录，也不会修改来源可信度或假设置信度。失败条目最多尝试 `AI_MAX_ATTEMPTS` 次；中断超过两小时的 `processing` 条目会在下一批恢复。
+
+## 自动化运营台
+
+侧边栏进入“自动化运营”后，可以完成以下日常工作：
+
+1. 查看 RSS、BLS、FRED、SEC、Eurostat 和 DeepSeek 的就绪状态。页面只显示状态和变量名称，不返回密钥值。
+2. 编辑来源名称、类别、可信度、抓取周期、单次上限和适配器 JSON；密钥仍必须通过 Sites 运行时环境管理。
+3. 对单个来源执行测试抓取，或在确认提示后人工运行整条管线。
+4. 查看最近 25 次整批运行和最近 40 次来源抓取日志。
+5. 按关键词、来源、人工审核状态和 AI 状态筛选抓取数据，并使用游标加载更多。
+6. 修复密钥或模型配置后，把仍待人工审核的失败 AI 条目重新排队。
+
+人工运行与零点 Cron 共用 `pipeline_locks`。同一时间只能有一个整批任务运行；锁两小时后可回收，旧的 `running` 记录会标记为失败，避免永久卡死。人工运行可能产生外部 API 费用，因此界面始终要求再次确认。
 
 ## 每周复盘
 

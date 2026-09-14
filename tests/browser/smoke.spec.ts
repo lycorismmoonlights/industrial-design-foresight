@@ -11,15 +11,31 @@ test("owner research flow persists in D1 and remains usable on mobile", async ({
 
   await page.getByRole("button", { name: "来源管理", exact: true }).click();
   await expect(page.getByRole("heading", { name: "来源管理", exact: true })).toBeVisible();
-  await expect(page.getByRole("button", { name: "确认并启用" })).toHaveCount(3);
+  await expect(page.getByRole("button", { name: "添加来源", exact: true })).toBeVisible();
+  await expect(page.getByText(/个来源/, { exact: false }).first()).toBeVisible();
 
   const sourceName = `CI 冒烟来源 ${Date.now()}`;
+  await page.getByRole("button", { name: "添加来源", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "添加来源", exact: true })).toBeVisible();
+  await page.getByRole("tab", { name: "RSS 订阅", exact: true }).click();
   await page.getByLabel("来源名称", { exact: true }).fill(sourceName);
-  await page.getByLabel("订阅地址", { exact: true }).fill(`https://example.com/${Date.now()}.xml`);
-  await page.getByRole("button", { name: "添加为停用状态", exact: true }).click();
+  await page.getByLabel("RSS / Atom 地址", { exact: true }).fill(`https://example.com/${Date.now()}.xml`);
+  await page.getByRole("button", { name: "添加并去测试", exact: true }).click();
   await expect(page.getByText(sourceName, { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "测试连接", exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "编辑设置", exact: true }).click();
+  await expect(page.getByRole("button", { name: "保存配置", exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "取消", exact: true }).click();
   await page.reload();
-  await expect(page.getByText(sourceName, { exact: true })).toBeVisible();
+  await expect(page.getByText(sourceName, { exact: true }).first()).toBeVisible();
+
+  await page.getByRole("button", { name: "自动化运营", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "API 与抓取数据运营台", exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "接口就绪状态", exact: true })).toBeVisible();
+  await expect(page.locator("strong", { hasText: sourceName })).toBeVisible();
+  await page.getByRole("button", { name: "配置", exact: true }).last().click();
+  await expect(page.getByRole("button", { name: "保存配置", exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "取消", exact: true }).click();
 
   await page.setViewportSize({ width: 390, height: 844 });
   await expect(page.getByRole("button", { name: "打开菜单", exact: true })).toBeVisible();
@@ -46,6 +62,8 @@ test("business API rejects anonymous and non-owner requests", async () => {
   });
   expect((await anonymous.get("/api/bootstrap")).status()).toBe(401);
   expect((await nonOwner.get("/api/bootstrap")).status()).toBe(403);
+  expect((await anonymous.get("/api/operations")).status()).toBe(401);
+  expect((await nonOwner.get("/api/operations")).status()).toBe(403);
   await anonymous.dispose();
   await nonOwner.dispose();
 });

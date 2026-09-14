@@ -160,6 +160,8 @@ export function useResearchData(initialUser: InitialUser) {
 
   async function createSource(input: {
     name: string; pageUrl?: string | null; feedUrl?: string | null; sourceCategory?: string;
+    adapterType?: SourceDto["adapterType"]; adapterConfig?: Record<string, unknown>;
+    cadence?: SourceDto["cadence"]; maxItemsPerRun?: number;
     defaultCredibility?: number; enabled?: boolean; confirmEnable?: boolean;
   }) {
     const source = await apiRequest<SourceDto>("/api/sources", { method: "POST", body: JSON.stringify(input) });
@@ -167,16 +169,20 @@ export function useResearchData(initialUser: InitialUser) {
     return source;
   }
 
-  async function updateSource(id: string, patch: Partial<Pick<SourceDto, "name" | "pageUrl" | "feedUrl" | "sourceCategory" | "defaultCredibility" | "enabled">>, confirmEnable = false) {
+  async function updateSource(id: string, patch: Partial<Pick<SourceDto, "name" | "pageUrl" | "feedUrl" | "adapterType" | "adapterConfig" | "cadence" | "maxItemsPerRun" | "sourceCategory" | "defaultCredibility" | "enabled">>, confirmEnable = false) {
     const source = await apiRequest<SourceDto>("/api/sources", { method: "PATCH", body: JSON.stringify({ id, patch, confirmEnable }) });
     await refresh();
     return source;
   }
 
   async function fetchSource(id: string) {
-    const result = await apiRequest<{ sourceId: string; status: string; newCount: number; durationMs: number }>(`/api/sources/${encodeURIComponent(id)}/fetch`, { method: "POST" });
-    await refresh();
-    return result;
+    try {
+      return await apiRequest<{ sourceId: string; status: string; newCount: number; durationMs: number }>(`/api/sources/${encodeURIComponent(id)}/fetch`, { method: "POST" });
+    } finally {
+      // Failed adapters still persist a sync run and source error on the server.
+      // Refresh in both outcomes so the diagnostics update without a page reload.
+      await refresh();
+    }
   }
 
   async function reviewInbox(id: string, input: {
@@ -206,6 +212,7 @@ export function useResearchData(initialUser: InitialUser) {
 
   return {
     data: data ?? { user: initialUser, records: [], sources: [], inboxStats: { pending: 0, reviewed: 0 }, inboxItems: [], evidence: [], settings: {} },
+    initialized: data !== null,
     records,
     store,
     loading,

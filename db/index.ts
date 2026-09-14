@@ -2,10 +2,18 @@ import { env } from "cloudflare:workers";
 import { drizzle } from "drizzle-orm/d1";
 import * as schema from "./schema";
 
-interface AppEnv {
+export interface AppEnv {
   DB?: D1Database;
   OWNER_EMAIL?: string;
   APP_ENV?: string;
+  DEEPSEEK_API_KEY?: string;
+  DEEPSEEK_MODEL?: string;
+  AI_PROCESSING_ENABLED?: string;
+  AI_DAILY_ITEM_LIMIT?: string;
+  AI_MAX_ATTEMPTS?: string;
+  FRED_API_KEY?: string;
+  BLS_API_KEY?: string;
+  SEC_USER_AGENT?: string;
 }
 
 export function getDb() {

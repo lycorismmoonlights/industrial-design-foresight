@@ -1,6 +1,6 @@
 {
   "name": "industrial-design-foresight",
-  "version": "0.2.0",
+  "version": "0.5.0",
   "private": true,
   "engines": {
     "node": ">=22.13.0"
@@ -11,6 +11,9 @@
     "start": "vinext start",
     "test": "vitest run",
     "test:browser": "playwright test",
+    "test:sync": "node --test scripts/sync-github.test.mjs",
+    "sync:github": "node scripts/sync-github.mjs --push",
+    "sync:github:preview": "node scripts/sync-github.mjs --dry-run",
     "typecheck": "tsc --noEmit",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
     "db:generate": "drizzle-kit generate",

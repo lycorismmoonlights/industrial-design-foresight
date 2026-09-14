@@ -20,6 +20,8 @@ export async function POST(request: Request) {
     const body = await readJson<{
       name?: string; pageUrl?: string | null; feedUrl?: string | null;
       sourceType?: SourceDto["sourceType"]; sourceCategory?: string;
+      adapterType?: SourceDto["adapterType"]; adapterConfig?: Record<string, unknown>;
+      cadence?: SourceDto["cadence"]; maxItemsPerRun?: number;
       defaultCredibility?: number; enabled?: boolean; confirmEnable?: boolean;
     }>(request);
     return ok(await createSource(user.userId, {
@@ -36,7 +38,12 @@ export async function PATCH(request: Request) {
     const user = await requireOwnerApi();
     const body = await readJson<{
       id?: string;
-      patch?: { name?: string; pageUrl?: string | null; feedUrl?: string | null; sourceCategory?: string; defaultCredibility?: number; enabled?: boolean };
+      patch?: {
+        name?: string; pageUrl?: string | null; feedUrl?: string | null;
+        adapterType?: SourceDto["adapterType"]; adapterConfig?: Record<string, unknown>;
+        cadence?: SourceDto["cadence"]; maxItemsPerRun?: number;
+        sourceCategory?: string; defaultCredibility?: number; enabled?: boolean;
+      };
       confirmEnable?: boolean;
     }>(request);
     if (!body.patch || typeof body.patch !== "object") throw new AppError(400, "PATCH_REQUIRED", "缺少来源更新内容。");

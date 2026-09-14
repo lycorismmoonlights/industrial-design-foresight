@@ -6,6 +6,7 @@ export type ViewId =
   | "opportunities"
   | "discussions"
   | "weekly"
+  | "operations"
   | "sources"
   | "inbox"
   | "evidence"
