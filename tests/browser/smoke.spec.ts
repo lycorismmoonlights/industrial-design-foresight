@@ -21,7 +21,7 @@ test("owner research flow persists in D1 and remains usable on mobile", async ({
   await page.getByLabel("来源名称", { exact: true }).fill(sourceName);
   await page.getByLabel("RSS / Atom 地址", { exact: true }).fill(`https://example.com/${Date.now()}.xml`);
   await page.getByRole("button", { name: "添加并去测试", exact: true }).click();
-  await expect(page.getByText(sourceName, { exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: sourceName, exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "测试连接", exact: true })).toBeVisible();
   await page.getByRole("button", { name: "编辑设置", exact: true }).click();
   await expect(page.getByRole("button", { name: "保存配置", exact: true })).toBeVisible();
