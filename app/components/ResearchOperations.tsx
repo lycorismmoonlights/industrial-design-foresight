@@ -1,10 +1,11 @@
 "use client";
 
 import { Activity, AlertTriangle, Check, CircleCheck, Clock3, Database, ExternalLink, FileSearch, Globe2, HelpCircle, Inbox, KeyRound, Link2, Plus, RefreshCcw, Rss, Search, Settings2, SlidersHorizontal, Target, X } from "lucide-react";
-import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
+import { FormEvent, useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { apiRequest } from "../data/api-client";
+import { useDialogA11y } from "../hooks/useDialogA11y";
 import type { useResearchData } from "../hooks/useResearchData";
-import type { OperationsOverviewDto } from "../operations-model";
+import type { OperationsInboxPageDto, OperationsOverviewDto } from "../operations-model";
 import type { EvidenceDto, InboxItemDto, SourceDto } from "../v2-model";
 import { SourceEditor } from "./SourceEditor";
 
@@ -94,12 +95,18 @@ function adapterConfig(adapter: ApiAdapter, identifier: string, label: string): 
   return { queries: [{ dataset: identifier, label, filters: {} }] };
 }
 
+function DialogFrame({ close, className, labelledBy, children }: { close: () => void; className: string; labelledBy: string; children: ReactNode }) {
+  const dialogRef = useDialogA11y(close);
+  return <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) close(); }}><section ref={dialogRef} tabIndex={-1} className={className} role="dialog" aria-modal="true" aria-labelledby={labelledBy}>{children}</section></div>;
+}
+
 function AddSourceDialog({ research, notify, close, created }: {
   research: Research;
   notify: Notify;
   close: () => void;
   created: (sourceId: string) => void;
 }) {
+  const dialogRef = useDialogA11y(close);
   const [mode, setMode] = useState<AddSourceMode>("preset");
   const [name, setName] = useState("");
   const [url, setUrl] = useState("");
@@ -126,7 +133,7 @@ function AddSourceDialog({ research, notify, close, created }: {
   }
 
   return <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) close(); }}>
-    <section className="modal-card add-source-dialog" role="dialog" aria-modal="true" aria-labelledby="add-source-title">
+    <section ref={dialogRef} tabIndex={-1} className="modal-card add-source-dialog" role="dialog" aria-modal="true" aria-labelledby="add-source-title">
       <div className="modal-head"><div><p className="eyebrow">ADD SOURCE</p><h2 id="add-source-title">添加来源</h2><span>选择一种方式，系统会在启用前让你测试连接。</span></div><button type="button" onClick={close} aria-label="关闭添加来源"><X size={16} /></button></div>
       <div className="source-method-tabs" role="tablist" aria-label="添加来源方式">
         {(["preset", "feed", "api", "page"] as const).map((value) => <button key={value} type="button" role="tab" aria-selected={mode === value} className={mode === value ? "active" : ""} onClick={() => setMode(value)}>{value === "preset" ? "推荐来源" : value === "feed" ? "RSS 订阅" : value === "api" ? "官方数据 API" : "普通网页"}</button>)}
@@ -217,8 +224,8 @@ export function SourcesView({ research, notify }: { research: Research; notify: 
     </section>
 
     {addOpen && <AddSourceDialog research={research} notify={notify} close={() => setAddOpen(false)} created={setSelectedId} />}
-    {selected && editOpen && <div className="modal-backdrop" role="presentation"><section className="modal-card source-edit-dialog" role="dialog" aria-modal="true" aria-labelledby="edit-source-title"><div className="modal-head"><div><p className="eyebrow">SOURCE SETTINGS</p><h2 id="edit-source-title">编辑 {selected.name}</h2></div><button type="button" onClick={() => setEditOpen(false)} aria-label="关闭来源设置"><X size={16} /></button></div><SourceEditor key={selected.updatedAt} source={selected} cancel={() => setEditOpen(false)} save={(patch, confirmEnable) => notify(() => research.updateSource(selected.id, patch, confirmEnable).then(async () => { setEditOpen(false); await loadOverview(); }), "来源配置已保存")} /></section></div>}
-    {runtimeHelp && <div className="modal-backdrop" role="presentation"><section className="confirm-card runtime-help-dialog" role="dialog" aria-modal="true" aria-labelledby="runtime-help-title"><div className="confirm-icon"><KeyRound size={21} /></div><h2 id="runtime-help-title">{runtimeHelp.action}</h2><p>为避免密钥泄露，浏览器不会读取或保存密钥。请在站点运行时变量中设置：</p><code>{runtimeHelp.key}</code><p>保存运行时配置后，回到这里点击“测试连接”。</p><div className="modal-actions"><button className="button primary" type="button" onClick={() => setRuntimeHelp(null)}>我知道了</button></div></section></div>}
+    {selected && editOpen && <DialogFrame close={() => setEditOpen(false)} className="modal-card source-edit-dialog" labelledBy="edit-source-title"><div className="modal-head"><div><p className="eyebrow">SOURCE SETTINGS</p><h2 id="edit-source-title">编辑 {selected.name}</h2></div><button type="button" onClick={() => setEditOpen(false)} aria-label="关闭来源设置"><X size={16} /></button></div><SourceEditor key={selected.updatedAt} source={selected} cancel={() => setEditOpen(false)} save={(patch, confirmEnable) => notify(() => research.updateSource(selected.id, patch, confirmEnable).then(async () => { setEditOpen(false); await loadOverview(); }), "来源配置已保存")} /></DialogFrame>}
+    {runtimeHelp && <DialogFrame close={() => setRuntimeHelp(null)} className="confirm-card runtime-help-dialog" labelledBy="runtime-help-title"><div className="confirm-icon"><KeyRound size={21} /></div><h2 id="runtime-help-title">{runtimeHelp.action}</h2><p>为避免密钥泄露，浏览器不会读取或保存密钥。请在站点运行时变量中设置：</p><code>{runtimeHelp.key}</code><p>保存运行时配置后，回到这里点击“测试连接”。</p><div className="modal-actions"><button className="button primary" type="button" onClick={() => setRuntimeHelp(null)}>我知道了</button></div></DialogFrame>}
   </div>;
 }
 
@@ -229,8 +236,48 @@ function ReviewCard({ item, review }: { item: InboxItemDto; review: (input: Para
 }
 
 export function InboxView({ research, notify }: { research: Research; notify: Notify }) {
-  const pending = research.data.inboxItems.filter((item) => item.reviewStatus === "pending");
-  return <div className="view-stack"><section className="ops-intro"><Inbox size={22} /><div><h2>{pending.length} 条资料等待判断</h2><p>“转为信号”只生成默认可信度 50 的草稿，并附上来源证据；AI 结果只是可覆盖的整理建议。</p></div></section><section className="inbox-list">{pending.length ? pending.map((item) => <ReviewCard key={item.id} item={item} review={(input) => notify(() => research.reviewInbox(item.id, input), input.action === "convert" ? "已生成信号草稿与证据" : "条目已处理")} />) : <div className="panel empty-ops"><Check size={24} /><h2>待审核箱已清空</h2><p>可在来源管理中手动同步，或等待每天 00:00 的定时抓取。</p></div>}</section></div>;
+  const [page, setPage] = useState<OperationsInboxPageDto>({ items: [], filteredCount: 0, nextCursor: null });
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState("");
+
+  const loadPage = useCallback(async (cursor?: string, append = false, signal?: AbortSignal) => {
+    setLoading(true);
+    setLoadError("");
+    try {
+      const params = new URLSearchParams({ limit: "40", reviewStatus: "pending" });
+      if (cursor) params.set("cursor", cursor);
+      const next = await apiRequest<OperationsInboxPageDto>(`/api/operations/inbox?${params}`, { signal });
+      if (signal?.aborted) return;
+      setPage((current) => append ? { ...next, items: [...current.items, ...next.items] } : next);
+    } catch (error) {
+      if (signal?.aborted) return;
+      setLoadError(error instanceof Error ? error.message : "无法载入待审核资料。");
+    } finally {
+      if (!signal?.aborted) setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => { void loadPage(undefined, false, controller.signal); }, 0);
+    return () => {
+      window.clearTimeout(timer);
+      controller.abort();
+    };
+  }, [loadPage]);
+
+  function review(item: InboxItemDto, input: Parameters<Research["reviewInbox"]>[1]) {
+    notify(async () => {
+      await research.reviewInbox(item.id, input);
+      setPage((current) => ({
+        ...current,
+        items: current.items.filter((candidate) => candidate.id !== item.id),
+        filteredCount: Math.max(0, current.filteredCount - 1),
+      }));
+    }, input.action === "convert" ? "已生成信号草稿与证据" : "条目已处理");
+  }
+
+  return <div className="view-stack"><section className="ops-intro"><Inbox size={22} /><div><h2>{research.data.inboxStats.pending} 条资料等待判断</h2><p>已载入 {page.items.length} / {page.filteredCount} 条。“转为信号”只生成默认可信度 50 的草稿，并附上来源证据；AI 结果只是可覆盖的整理建议。</p></div></section>{loadError && <div className="inline-error">{loadError}<button type="button" onClick={() => void loadPage()}>重试</button></div>}<section className="inbox-list">{page.items.length ? page.items.map((item) => <ReviewCard key={item.id} item={item} review={(input) => review(item, input)} />) : !loading && <div className="panel empty-ops"><Check size={24} /><h2>待审核箱已清空</h2><p>可在来源管理中手动同步，或等待每天 00:00 的定时抓取。</p></div>}</section>{page.nextCursor && <button className="button secondary" type="button" disabled={loading} onClick={() => void loadPage(page.nextCursor ?? undefined, true)}>{loading ? "载入中…" : "载入更多待审核资料"}</button>}</div>;
 }
 
 export function EvidenceView({ research, notify }: { research: Research; notify: Notify }) {

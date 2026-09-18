@@ -37,6 +37,7 @@ import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { demoStore, scenarioPresets } from "../demo-data";
 import { useResearchData, type InitialUser } from "../hooks/useResearchData";
+import { useDialogA11y } from "../hooks/useDialogA11y";
 import { EvidenceView, InboxView, SourcesView, WeeklyView } from "./ResearchOperations";
 import { AutomationOperations } from "./AutomationOperations";
 import {
@@ -56,7 +57,7 @@ import {
 } from "../model";
 import type { RecordDto, RevisionDto } from "../v2-model";
 
-type ModalType = "signal" | "skill" | "opportunity" | "discussion" | null;
+type ModalType = "signal" | "indicator" | "hypothesis" | "skill" | "opportunity" | "discussion" | null;
 
 const NAV: Array<{ id: ViewId; label: string; icon: LucideIcon; group?: string }> = [
   { id: "dashboard", label: "研究总览", icon: LayoutDashboard, group: "工作台" },
@@ -90,6 +91,7 @@ const VIEW_COPY: Record<ViewId, { eyebrow: string; title: string; description: s
 
 const RINGS: RadarRing[] = ["行动", "试验", "研究", "关注"];
 const QUADRANTS: RadarQuadrant[] = ["需求与商业", "技术与工具", "制造与材料", "社会与规则"];
+const SCENARIO_INDICATOR_INDEX = new Map(demoStore.indicators.map((indicator, index) => [indicator.label, index]));
 
 function formatDate(value: string) {
   return new Intl.DateTimeFormat("zh-CN", { month: "2-digit", day: "2-digit" }).format(new Date(value));
@@ -121,8 +123,10 @@ export function ForesightApp({ initialUser }: { initialUser: InitialUser }) {
   const [query, setQuery] = useState("");
   const [menuOpen, setMenuOpen] = useState(false);
   const [modalType, setModalType] = useState<ModalType>(null);
+  const [scenarioKey, setScenarioKey] = useState<keyof typeof scenarioPresets | null>(null);
   const [notice, setNotice] = useState("");
   const importRef = useRef<HTMLInputElement>(null);
+  const restoreRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     const savedView = window.localStorage.getItem("id-foresight-ui-view") as ViewId | null;
@@ -142,7 +146,23 @@ export function ForesightApp({ initialUser }: { initialUser: InitialUser }) {
     return () => window.clearTimeout(timer);
   }, [notice]);
 
-  const phase = useMemo(() => calculatePhase(store.indicators), [store.indicators]);
+  const displayStore = useMemo<ResearchStore>(() => {
+    if (!scenarioKey) return store;
+    const preset = scenarioPresets[scenarioKey];
+    return {
+      ...store,
+      indicators: store.indicators.map((item) => {
+        const presetIndex = SCENARIO_INDICATOR_INDEX.get(item.label);
+        if (presetIndex === undefined) return item;
+        return {
+          ...item,
+          value: preset.values[presetIndex] as Indicator["value"],
+          direction: preset.directions[presetIndex] as Indicator["direction"],
+        };
+      }),
+    };
+  }, [scenarioKey, store]);
+  const phase = useMemo(() => calculatePhase(displayStore.indicators), [displayStore.indicators]);
   const searchSignals = useMemo(() => {
     const needle = query.trim().toLowerCase();
     if (!needle) return store.signals;
@@ -164,18 +184,14 @@ export function ForesightApp({ initialUser }: { initialUser: InitialUser }) {
   }
 
   function updateIndicator(id: string, patch: Partial<Indicator>) {
+    setScenarioKey(null);
     void run(() => research.patchLegacy("indicator", id, patch as Record<string, unknown>), "指标已保存");
   }
 
   function applyScenario(key: keyof typeof scenarioPresets) {
     const preset = scenarioPresets[key];
-    void run(
-      () => Promise.all(store.indicators.map((item, index) => research.patchLegacy("indicator", item.id, {
-        value: preset.values[index] as Indicator["value"],
-        direction: preset.directions[index] as Indicator["direction"],
-      }))),
-      `已载入“${preset.label}”情景`,
-    );
+    setScenarioKey(key);
+    setNotice(`正在预览“${preset.label}”情景，不会写入真实指标`);
   }
 
   function updateSkill(id: string, level: Skill["level"]) {
@@ -224,8 +240,24 @@ export function ForesightApp({ initialUser }: { initialUser: InitialUser }) {
     await run(() => research.importV1(JSON.stringify(demoStore)), "示例研究数据已导入");
   }
 
-  async function createRecord(kind: Exclude<ModalType, null>, value: Record<string, unknown>) {
-    await run(() => research.createLegacy(kind, value), "记录已保存到云端");
+  async function restoreData(event: React.ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    try {
+      if (!window.confirm("完整恢复只适用于空研究库，并会用备份中的设置替换当前默认设置。确认继续？")) return;
+      const result = await research.importV2(await file.text());
+      const total = Object.values(result.counts).reduce((sum, count) => sum + count, 0);
+      setNotice(`v2 完整备份恢复成功：${total} 行数据`);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "v2 完整备份恢复失败");
+    } finally {
+      event.target.value = "";
+    }
+  }
+
+  async function createRecord(kind: Exclude<ModalType, null>, value: Record<string, unknown>, changeReason?: string) {
+    await research.createLegacy(kind, value, changeReason ? { changeReason } : undefined);
+    setNotice("记录已保存到云端");
   }
 
   if (research.loading && !research.initialized) {
@@ -286,11 +318,11 @@ export function ForesightApp({ initialUser }: { initialUser: InitialUser }) {
           {!research.records.length && ["dashboard", "radar", "forecast", "skills", "opportunities", "discussions"].includes(activeView) && <section className="empty-cloud"><Database size={24} /><div><h2>研究库目前为空</h2><p>导入旧版备份或示例数据后，即可继续使用雷达、预测、技能和机会功能。</p></div><button className="button secondary" onClick={() => navigate("data")}>前往导入</button></section>}
 
           {activeView === "dashboard" && (
-            <DashboardView store={store} phase={phase} signals={searchSignals} navigate={navigate} applyScenario={applyScenario} />
+            <DashboardView store={displayStore} phase={phase} signals={searchSignals} navigate={navigate} applyScenario={applyScenario} />
           )}
           {activeView === "radar" && <RadarView signals={searchSignals} openAdd={() => setModalType("signal")} />}
           {activeView === "forecast" && (
-            <ForecastView store={store} phase={phase} updateIndicator={updateIndicator} applyScenario={applyScenario} />
+            <ForecastView store={displayStore} phase={phase} updateIndicator={updateIndicator} applyScenario={applyScenario} activeScenario={scenarioKey} resetScenario={() => { setScenarioKey(null); setNotice("已返回真实指标"); }} />
           )}
           {activeView === "skills" && <SkillsView skills={store.skills} updateSkill={updateSkill} openAdd={() => setModalType("skill")} />}
           {activeView === "opportunities" && <OpportunityView opportunities={store.opportunities} updateStatus={updateOpportunity} openAdd={() => setModalType("opportunity")} />}
@@ -301,12 +333,13 @@ export function ForesightApp({ initialUser }: { initialUser: InitialUser }) {
           {activeView === "inbox" && <InboxView research={research} notify={(action, success) => void run(action, success)} />}
           {activeView === "evidence" && <EvidenceView research={research} notify={(action, success) => void run(action, success)} />}
           {activeView === "data" && (
-            <DataView store={store} records={research.records} exportData={() => void exportData()} importData={() => importRef.current?.click()} importExample={() => void importExample()} archive={(record) => void run(() => research.setStatus(record, "archived"), "记录已归档")} restore={(record) => void run(() => record.deletedAt ? research.restore(record) : research.setStatus(record, "published"), "记录已恢复")} remove={(record) => void run(() => research.softDelete(record), "记录已移入回收站")} revisions={research.revisions} update={(record, patch, reason) => research.updateRecord(record, patch, reason)} />
+            <DataView store={store} records={research.records} exportData={() => void exportData()} importData={() => importRef.current?.click()} restoreData={() => restoreRef.current?.click()} canRestore={!research.records.length && !research.data.sources.length && !research.data.evidence.length && research.data.inboxStats.pending + research.data.inboxStats.reviewed === 0} importExample={() => void importExample()} archive={(record) => void run(() => research.setStatus(record, "archived"), "记录已归档")} restore={(record) => void run(() => record.deletedAt ? research.restore(record) : research.setStatus(record, "published"), "记录已恢复")} remove={(record) => void run(() => research.softDelete(record), "记录已移入回收站")} revisions={research.revisions} update={(record, patch, reason) => research.updateRecord(record, patch, reason)} />
           )}
         </div>
       </main>
 
       <input ref={importRef} className="visually-hidden" type="file" accept="application/json,.json" onChange={importData} />
+      <input ref={restoreRef} className="visually-hidden" type="file" accept="application/json,.json" onChange={restoreData} />
       {modalType && <AddRecordModal type={modalType} close={() => setModalType(null)} create={createRecord} changeType={setModalType} />}
       {notice && <div className="toast" role="status"><Check size={16} />{notice}</div>}
     </div>
@@ -425,7 +458,7 @@ function RadarView({ signals, openAdd }: { signals: Signal[]; openAdd: () => voi
   );
 }
 
-function ForecastView({ store, phase, updateIndicator, applyScenario }: { store: ResearchStore; phase: ReturnType<typeof calculatePhase>; updateIndicator: (id: string, patch: Partial<Indicator>) => void; applyScenario: (key: keyof typeof scenarioPresets) => void }) {
+function ForecastView({ store, phase, updateIndicator, applyScenario, activeScenario, resetScenario }: { store: ResearchStore; phase: ReturnType<typeof calculatePhase>; updateIndicator: (id: string, patch: Partial<Indicator>) => void; applyScenario: (key: keyof typeof scenarioPresets) => void; activeScenario: keyof typeof scenarioPresets | null; resetScenario: () => void }) {
   return <div className="view-stack">
     <section className="forecast-summary">
       <div className="forecast-year"><span>核心节点</span><strong>2029</strong><p>研究窗口：2028 Q2 — 2030 Q1</p></div>
@@ -435,8 +468,8 @@ function ForecastView({ store, phase, updateIndicator, applyScenario }: { store:
     </section>
 
     <section className="panel">
-      <PanelTitle eyebrow="一键推演" title="五种演示情景" />
-      <div className="scenario-presets">{(Object.entries(scenarioPresets) as Array<[keyof typeof scenarioPresets, (typeof scenarioPresets)[keyof typeof scenarioPresets]]>).map(([key, item]) => <button key={key} onClick={() => applyScenario(key)}><span>{item.label}</span><small>{item.description}</small><ChevronRight size={15} /></button>)}</div>
+      <PanelTitle eyebrow="一键推演 · 仅预览" title="五种演示情景" action={activeScenario ? <button className="button ghost compact" type="button" onClick={resetScenario}>返回真实数据</button> : undefined} />
+      <div className="scenario-presets">{(Object.entries(scenarioPresets) as Array<[keyof typeof scenarioPresets, (typeof scenarioPresets)[keyof typeof scenarioPresets]]>).map(([key, item]) => <button key={key} className={activeScenario === key ? "active" : ""} aria-pressed={activeScenario === key} onClick={() => applyScenario(key)}><span>{item.label}</span><small>{item.description}</small><ChevronRight size={15} /></button>)}</div>
     </section>
 
     <section className="hypothesis-grid">
@@ -489,11 +522,13 @@ function DiscussionView({ discussions, convertDecision, openAdd }: { discussions
   </div>;
 }
 
-function DataView({ store, records, exportData, importData, importExample, archive, restore, remove, revisions, update }: {
+function DataView({ store, records, exportData, importData, restoreData, canRestore, importExample, archive, restore, remove, revisions, update }: {
   store: ResearchStore;
   records: RecordDto[];
   exportData: () => void;
   importData: () => void;
+  restoreData: () => void;
+  canRestore: boolean;
   importExample: () => void;
   archive: (record: RecordDto) => void;
   restore: (record: RecordDto) => void;
@@ -515,7 +550,7 @@ function DataView({ store, records, exportData, importData, importExample, archi
     <section className="data-hero"><div><Database size={24} /><h2>D1 私有研究库</h2><p>业务数据跨设备保存；每次变更都形成完整快照，并以版本号阻止静默覆盖。</p></div><span><ShieldCheck size={16} />OWNER ONLY</span></section>
     <section className="collection-grid">{collections.map(([label, count, Icon]) => <div className="collection-card" key={label}><Icon size={18} /><span>{label}</span><strong>{count}</strong></div>)}</section>
     <section className="two-column equal">
-      <div className="panel data-actions"><PanelTitle eyebrow="迁移与恢复" title="JSON 备份" /><button onClick={exportData}><span className="data-action-icon"><Download size={20} /></span><div><strong>导出 v2 完整备份</strong><p>包含业务数据、来源、证据、修订和设置。</p></div><ChevronRight size={18} /></button><button onClick={importData}><span className="data-action-icon"><Upload size={20} /></span><div><strong>导入 v1 备份</strong><p>六类记录转成服务端 UUID；同一文件只允许导入一次。</p></div><ChevronRight size={18} /></button><button className="reset-action" onClick={importExample}><span className="data-action-icon"><RefreshCcw size={20} /></span><div><strong>导入示例研究</strong><p>仅供首次体验；不会覆盖已有数据。</p></div><ChevronRight size={18} /></button></div>
+      <div className="panel data-actions"><PanelTitle eyebrow="迁移与恢复" title="JSON 备份" /><button onClick={exportData}><span className="data-action-icon"><Download size={20} /></span><div><strong>导出 v2 完整备份</strong><p>包含业务数据、来源、证据、修订和设置。</p></div><ChevronRight size={18} /></button><button onClick={restoreData} disabled={!canRestore}><span className="data-action-icon"><Upload size={20} /></span><div><strong>恢复 v2 完整备份</strong><p>{canRestore ? "仅写入空研究库；恢复时自动重映射内部 ID。" : "当前研究库非空；为避免覆盖，完整恢复已锁定。"}</p></div><ChevronRight size={18} /></button><button onClick={importData}><span className="data-action-icon"><Upload size={20} /></span><div><strong>导入 v1 备份</strong><p>六类记录转成服务端 UUID；同一文件只允许导入一次。</p></div><ChevronRight size={18} /></button><button className="reset-action" onClick={importExample}><span className="data-action-icon"><RefreshCcw size={20} /></span><div><strong>导入示例研究</strong><p>仅供首次体验；不会覆盖已有数据。</p></div><ChevronRight size={18} /></button></div>
       <div className="panel reference-panel"><PanelTitle eyebrow="可靠性" title="数据保护机制" /><div className="reliability-list"><p><ShieldCheck size={17} /><span><strong>唯一所有者</strong> 页面与 API 同时校验登录邮箱。</span></p><p><History size={17} /><span><strong>完整修订</strong> 每次修改、归档、删除与恢复均留存快照。</span></p><p><RefreshCcw size={17} /><span><strong>冲突保护</strong> expectedRevision 不一致时返回 409。</span></p></div></div>
     </section>
     <section className="panel record-admin"><PanelTitle eyebrow="统一记录" title="编辑、归档与历史" />{records.length === 0 ? <p className="empty-note">还没有记录。先导入备份、示例数据或新建一条信号。</p> : <div className="record-table">{records.map((record) => <article key={record.id} className={record.deletedAt ? "is-deleted" : ""}><div><span className="record-kind">{record.kind}</span><strong>{record.title}</strong><small>v{record.revision} · {record.deletedAt ? "回收站" : record.status}</small></div><div className="record-actions"><button onClick={() => void openHistory(record)}><History size={14} />历史</button>{!record.deletedAt && <button onClick={() => setEditing(record)}>编辑</button>}{!record.deletedAt && record.status !== "archived" && <button onClick={() => archive(record)}>归档</button>}{(record.deletedAt || record.status === "archived") && <button onClick={() => restore(record)}>恢复</button>}{!record.deletedAt && <button className="danger-link" onClick={() => remove(record)}>删除</button>}</div></article>)}</div>}</section>
@@ -525,6 +560,7 @@ function DataView({ store, records, exportData, importData, importExample, archi
 }
 
 function RecordEditor({ record, close, save }: { record: RecordDto; close: () => void; save: (record: RecordDto, patch: { title: string; summary: string; payload: Record<string, unknown>; status?: RecordDto["status"] }, reason?: string) => Promise<RecordDto> }) {
+  const dialogRef = useDialogA11y(close);
   const [title, setTitle] = useState(record.title);
   const [summary, setSummary] = useState(record.summary);
   const [payload, setPayload] = useState(JSON.stringify(record.payload, null, 2));
@@ -541,38 +577,54 @@ function RecordEditor({ record, close, save }: { record: RecordDto; close: () =>
       setError(saveError instanceof Error ? saveError.message : "保存失败。");
     }
   }
-  return <div className="modal-backdrop"><section className="modal-card" role="dialog" aria-modal="true" aria-label="编辑记录"><div className="modal-head"><div><p className="eyebrow">RECORD v{record.revision}</p><h2>编辑{record.title}</h2></div><button aria-label="关闭" onClick={close}><X size={19} /></button></div><form onSubmit={submit}><label className="form-field"><span>标题</span><input required value={title} onChange={(event) => setTitle(event.target.value)} /></label><label className="form-field"><span>状态</span><select value={status} onChange={(event) => setStatus(event.target.value as RecordDto["status"])}><option value="draft">草稿</option><option value="published">发布</option><option value="archived">归档</option></select></label><label className="form-field"><span>摘要</span><textarea value={summary} onChange={(event) => setSummary(event.target.value)} /></label><label className="form-field"><span>结构化字段 JSON</span><textarea className="json-editor" value={payload} onChange={(event) => setPayload(event.target.value)} spellCheck={false} /></label>{record.kind === "signal" && status === "published" && <p className="form-hint">发布信号前，JSON 中的 quadrant 必须是四个正式象限之一，并且信号至少关联一条证据。</p>}<label className="form-field"><span>变更理由{record.kind === "hypothesis" ? " *" : ""}</span><input required={record.kind === "hypothesis"} value={reason} onChange={(event) => setReason(event.target.value)} placeholder="为什么修改；假设、置信度或证伪条件变更时必填" /></label>{error && <p className="form-error">{error}</p>}<div className="modal-actions"><button type="button" className="button ghost" onClick={close}>取消</button><button className="button primary" type="submit">保存新版本</button></div></form></section></div>;
+  return <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) close(); }}><section ref={dialogRef} tabIndex={-1} className="modal-card" role="dialog" aria-modal="true" aria-label="编辑记录"><div className="modal-head"><div><p className="eyebrow">RECORD v{record.revision}</p><h2>编辑{record.title}</h2></div><button aria-label="关闭" onClick={close}><X size={19} /></button></div><form onSubmit={submit}><label className="form-field"><span>标题</span><input required value={title} onChange={(event) => setTitle(event.target.value)} /></label><label className="form-field"><span>状态</span><select value={status} onChange={(event) => setStatus(event.target.value as RecordDto["status"])}><option value="draft">草稿</option><option value="published">发布</option><option value="archived">归档</option></select></label><label className="form-field"><span>摘要</span><textarea value={summary} onChange={(event) => setSummary(event.target.value)} /></label><label className="form-field"><span>结构化字段 JSON</span><textarea className="json-editor" value={payload} onChange={(event) => setPayload(event.target.value)} spellCheck={false} /></label>{record.kind === "signal" && status === "published" && <p className="form-hint">发布信号前，JSON 中的 quadrant 必须是四个正式象限之一，并且信号至少关联一条证据。</p>}<label className="form-field"><span>变更理由{record.kind === "hypothesis" ? " *" : ""}</span><input required={record.kind === "hypothesis"} value={reason} onChange={(event) => setReason(event.target.value)} placeholder="为什么修改；假设、置信度或证伪条件变更时必填" /></label>{error && <p className="form-error">{error}</p>}<div className="modal-actions"><button type="button" className="button ghost" onClick={close}>取消</button><button className="button primary" type="submit">保存新版本</button></div></form></section></div>;
 }
 
 function HistoryModal({ record, history, close }: { record: RecordDto; history: RevisionDto[]; close: () => void }) {
-  return <div className="modal-backdrop"><section className="modal-card history-modal" role="dialog" aria-modal="true" aria-label="历史版本"><div className="modal-head"><div><p className="eyebrow">REVISION HISTORY</p><h2>{record.title}</h2></div><button aria-label="关闭" onClick={close}><X size={19} /></button></div><div className="history-list">{history.map((item) => <article key={item.id}><span>v{item.revision}</span><div><strong>{item.changeReason || "未填写理由"}</strong><p>{new Date(item.createdAt).toLocaleString("zh-CN")} · {item.changedBy}</p></div></article>)}</div><div className="modal-actions"><button className="button ghost" onClick={close}>关闭</button></div></section></div>;
+  const dialogRef = useDialogA11y(close);
+  return <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) close(); }}><section ref={dialogRef} tabIndex={-1} className="modal-card history-modal" role="dialog" aria-modal="true" aria-label="历史版本"><div className="modal-head"><div><p className="eyebrow">REVISION HISTORY</p><h2>{record.title}</h2></div><button aria-label="关闭" onClick={close}><X size={19} /></button></div><div className="history-list">{history.map((item) => <article key={item.id}><span>v{item.revision}</span><div><strong>{item.changeReason || "未填写理由"}</strong><p>{new Date(item.createdAt).toLocaleString("zh-CN")} · {item.changedBy}</p></div></article>)}</div><div className="modal-actions"><button className="button ghost" onClick={close}>关闭</button></div></section></div>;
 }
 
-function AddRecordModal({ type, close, create, changeType }: { type: Exclude<ModalType, null>; close: () => void; create: (type: Exclude<ModalType, null>, value: Record<string, unknown>) => Promise<void>; changeType: (type: ModalType) => void }) {
+function AddRecordModal({ type, close, create, changeType }: { type: Exclude<ModalType, null>; close: () => void; create: (type: Exclude<ModalType, null>, value: Record<string, unknown>, changeReason?: string) => Promise<void>; changeType: (type: ModalType) => void }) {
+  const dialogRef = useDialogA11y(close);
   const [form, setForm] = useState<Record<string, string>>({});
+  const [error, setError] = useState("");
+  const [saving, setSaving] = useState(false);
   const set = (key: string, value: string) => setForm((current) => ({ ...current, [key]: value }));
+  const list = (value = "") => value.split(/[\n，,；;]+/).map((item) => item.trim()).filter(Boolean);
   async function submit(event: FormEvent) {
     event.preventDefault();
     if (!form.title?.trim()) return;
-    if (type === "signal") {
-      await create(type, { title: form.title.trim(), summary: form.summary?.trim() || "待补充摘要", quadrant: form.quadrant || "需求与商业", ring: form.ring || "关注", movement: "稳定", impact: 0, confidence: 50, sourceName: form.source?.trim() || "个人观察 / 待验证", ...(form.url?.trim() ? { sourceUrl: form.url.trim() } : {}), observedAt: new Date().toISOString().slice(0, 10), tags: form.tags?.split(/[，,]/).map((x) => x.trim()).filter(Boolean) || [] });
+    setSaving(true);
+    setError("");
+    try {
+      if (type === "signal") {
+        await create(type, { title: form.title.trim(), summary: form.summary?.trim() || "待补充摘要", quadrant: form.quadrant || "需求与商业", ring: form.ring || "关注", movement: "稳定", impact: 0, confidence: 50, sourceName: form.source?.trim() || "个人观察 / 待验证", ...(form.url?.trim() ? { sourceUrl: form.url.trim() } : {}), observedAt: new Date().toISOString().slice(0, 10), tags: list(form.tags) });
+      } else if (type === "indicator") {
+        await create(type, { label: form.title.trim(), category: form.category || "需求与商业", value: Number(form.indicatorValue ?? 0), direction: Number(form.direction ?? 0), weight: Number(form.weight ?? 1), note: form.note?.trim() || "待补充指标口径与判断规则。" });
+      } else if (type === "hypothesis") {
+        await create(type, { title: form.title.trim(), statement: form.statement?.trim() || "待补充可验证陈述。", timeWindow: form.timeWindow?.trim() || "待定义", confidence: Number(form.confidence ?? 50), status: form.hypothesisStatus || "待验证", evidenceFor: list(form.evidenceFor), evidenceAgainst: list(form.evidenceAgainst), falsifier: form.falsifier?.trim() || "待定义证伪条件。" }, form.reason?.trim());
+      } else if (type === "skill") {
+        await create(type, { name: form.title.trim(), category: form.category || "研究", level: 0, target: 3, priority: form.priority || "中", evidence: form.evidence || "暂无验证证据", nextAction: form.action || "定义一个可在两周内完成的验证动作", crisisValue: form.value || "待评估" });
+      } else if (type === "opportunity") {
+        await create(type, { title: form.title.trim(), horizon: form.horizon || "现在", status: "观察", trigger: form.trigger || "待定义可观察触发器", targetUser: form.user || "待验证目标用户", readiness: 40, timing: 50, resilience: 60, nextAction: form.action || "完成一次最小需求验证" });
+      } else {
+        await create(type, { title: form.title.trim(), category: form.discussionCategory || "研究问题", body: form.body || "待补充讨论背景与希望得到的结论。", author: "Mina", createdAt: new Date().toISOString().slice(0, 10), replies: 0, status: "开放" });
+      }
+      close();
+    } catch (saveError) {
+      setError(saveError instanceof Error ? saveError.message : "保存失败，请重试。");
+    } finally {
+      setSaving(false);
     }
-    if (type === "skill") {
-      await create(type, { name: form.title.trim(), category: form.category || "研究", level: 0, target: 3, priority: form.priority || "中", evidence: form.evidence || "暂无验证证据", nextAction: form.action || "定义一个可在两周内完成的验证动作", crisisValue: form.value || "待评估" });
-    }
-    if (type === "opportunity") {
-      await create(type, { title: form.title.trim(), horizon: form.horizon || "现在", status: "观察", trigger: form.trigger || "待定义可观察触发器", targetUser: form.user || "待验证目标用户", readiness: 40, timing: 50, resilience: 60, nextAction: form.action || "完成一次最小需求验证" });
-    }
-    if (type === "discussion") {
-      await create(type, { title: form.title.trim(), category: form.discussionCategory || "研究问题", body: form.body || "待补充讨论背景与希望得到的结论。", author: "Mina", createdAt: new Date().toISOString().slice(0, 10), replies: 0, status: "开放" });
-    }
-    close();
   }
-  const label = { signal: "行业信号", skill: "技能", opportunity: "机会", discussion: "讨论" }[type];
-  return <div className="modal-backdrop"><section className="modal-card" role="dialog" aria-modal="true" aria-label={`新增${label}`}><div className="modal-head"><div><p className="eyebrow">快速录入</p><h2>新增{label}</h2></div><button aria-label="关闭" onClick={close}><X size={19} /></button></div><div className="type-tabs">{(["signal", "skill", "opportunity", "discussion"] as const).map((item) => <button key={item} className={type === item ? "active" : ""} onClick={() => { setForm({}); changeType(item); }}>{({ signal: "信号", skill: "技能", opportunity: "机会", discussion: "讨论" } as const)[item]}</button>)}</div><form onSubmit={submit}><label className="form-field"><span>标题 *</span><input required value={form.title || ""} onChange={(e) => set("title", e.target.value)} placeholder={{ signal: "观察到什么变化？", skill: "需要储备什么能力？", opportunity: "可能出现什么机会？", discussion: "要讨论什么研究问题？" }[type]} /></label>
+  const label = { signal: "行业信号", indicator: "指标", hypothesis: "假设", skill: "技能", opportunity: "机会", discussion: "讨论" }[type];
+  return <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) close(); }}><section ref={dialogRef} tabIndex={-1} className="modal-card" role="dialog" aria-modal="true" aria-label={`新增${label}`}><div className="modal-head"><div><p className="eyebrow">快速录入</p><h2>新增{label}</h2></div><button aria-label="关闭" onClick={close}><X size={19} /></button></div><div className="type-tabs">{(["signal", "indicator", "hypothesis", "skill", "opportunity", "discussion"] as const).map((item) => <button type="button" key={item} className={type === item ? "active" : ""} onClick={() => { setForm({}); setError(""); changeType(item); }}>{({ signal: "信号", indicator: "指标", hypothesis: "假设", skill: "技能", opportunity: "机会", discussion: "讨论" } as const)[item]}</button>)}</div><form onSubmit={submit}><label className="form-field"><span>标题 *</span><input required value={form.title || ""} onChange={(e) => set("title", e.target.value)} placeholder={{ signal: "观察到什么变化？", indicator: "要持续校准什么指标？", hypothesis: "提出一个可被证伪的判断", skill: "需要储备什么能力？", opportunity: "可能出现什么机会？", discussion: "要讨论什么研究问题？" }[type]} /></label>
     {type === "signal" && <><label className="form-field"><span>摘要</span><textarea value={form.summary || ""} onChange={(e) => set("summary", e.target.value)} placeholder="说明它为何影响工业设计行业，而不只是一条新闻。" /></label><div className="form-grid"><label className="form-field"><span>象限</span><select value={form.quadrant || "需求与商业"} onChange={(e) => set("quadrant", e.target.value)}>{QUADRANTS.map((x) => <option key={x}>{x}</option>)}</select></label><label className="form-field"><span>行动环</span><select value={form.ring || "关注"} onChange={(e) => set("ring", e.target.value)}>{RINGS.map((x) => <option key={x}>{x}</option>)}</select></label></div><div className="form-grid"><label className="form-field"><span>来源名称</span><input value={form.source || ""} onChange={(e) => set("source", e.target.value)} placeholder="报告、访谈或个人观察" /></label><label className="form-field"><span>来源 URL</span><input type="url" value={form.url || ""} onChange={(e) => set("url", e.target.value)} placeholder="https://…" /></label></div><label className="form-field"><span>标签</span><input value={form.tags || ""} onChange={(e) => set("tags", e.target.value)} placeholder="用逗号分隔" /></label></>}
+    {type === "indicator" && <><div className="form-grid"><label className="form-field"><span>指标类别</span><select value={form.category || "需求与商业"} onChange={(e) => set("category", e.target.value)}>{QUADRANTS.map((item) => <option key={item}>{item}</option>)}</select></label><label className="form-field"><span>权重</span><input type="number" min="0.1" max="5" step="0.1" value={form.weight ?? "1"} onChange={(e) => set("weight", e.target.value)} /></label></div><div className="form-grid"><label className="form-field"><span>当前评分</span><select value={form.indicatorValue ?? "0"} onChange={(e) => set("indicatorValue", e.target.value)}><option value="-2">-2 严重承压</option><option value="-1">-1 承压</option><option value="0">0 中性</option><option value="1">+1 改善</option><option value="2">+2 明显改善</option></select></label><label className="form-field"><span>趋势</span><select value={form.direction ?? "0"} onChange={(e) => set("direction", e.target.value)}><option value="-1">↘ 恶化</option><option value="0">→ 持平</option><option value="1">↗ 改善</option></select></label></div><label className="form-field"><span>口径与判断规则</span><textarea value={form.note || ""} onChange={(e) => set("note", e.target.value)} placeholder="说明观察对象、更新频率，以及什么算正向或负向。" /></label></>}
+    {type === "hypothesis" && <><label className="form-field"><span>可验证陈述 *</span><textarea required value={form.statement || ""} onChange={(e) => set("statement", e.target.value)} placeholder="明确时间、对象和预期变化，避免只写方向性口号。" /></label><div className="form-grid"><label className="form-field"><span>观察窗口</span><input value={form.timeWindow || ""} onChange={(e) => set("timeWindow", e.target.value)} placeholder="例如 2028 Q2 — 2030 Q1" /></label><label className="form-field"><span>主观置信度</span><input type="number" min="0" max="100" value={form.confidence ?? "50"} onChange={(e) => set("confidence", e.target.value)} /></label></div><label className="form-field"><span>状态</span><select value={form.hypothesisStatus || "待验证"} onChange={(e) => set("hypothesisStatus", e.target.value)}><option>待验证</option><option>跟踪中</option><option>部分支持</option><option>被削弱</option></select></label><div className="form-grid"><label className="form-field"><span>支持证据</span><textarea value={form.evidenceFor || ""} onChange={(e) => set("evidenceFor", e.target.value)} placeholder="每行或逗号分隔" /></label><label className="form-field"><span>反方证据</span><textarea value={form.evidenceAgainst || ""} onChange={(e) => set("evidenceAgainst", e.target.value)} placeholder="每行或逗号分隔" /></label></div><label className="form-field"><span>证伪条件 *</span><textarea required value={form.falsifier || ""} onChange={(e) => set("falsifier", e.target.value)} placeholder="出现什么事实时，应降低置信度或放弃该假设？" /></label><label className="form-field"><span>建立理由 *</span><input required value={form.reason || ""} onChange={(e) => set("reason", e.target.value)} placeholder="为什么现在建立这条假设？" /></label></>}
     {type === "skill" && <><div className="form-grid"><label className="form-field"><span>类别</span><select value={form.category || "研究"} onChange={(e) => set("category", e.target.value)}><option>研究</option><option>工程</option><option>数字</option><option>商业</option><option>表达</option></select></label><label className="form-field"><span>优先级</span><select value={form.priority || "中"} onChange={(e) => set("priority", e.target.value)}><option>高</option><option>中</option><option>低</option></select></label></div><label className="form-field"><span>现有证据</span><input value={form.evidence || ""} onChange={(e) => set("evidence", e.target.value)} placeholder="课程、项目、测试或作品" /></label><label className="form-field"><span>下一动作</span><textarea value={form.action || ""} onChange={(e) => set("action", e.target.value)} placeholder="两周内可以完成的最小动作" /></label><label className="form-field"><span>危机价值</span><input value={form.value || ""} onChange={(e) => set("value", e.target.value)} placeholder="它如何帮助防守或抓住复苏窗口" /></label></>}
     {type === "opportunity" && <><div className="form-grid"><label className="form-field"><span>机会窗口</span><select value={form.horizon || "现在"} onChange={(e) => set("horizon", e.target.value)}><option>现在</option><option>危机期</option><option>复苏窗口</option></select></label><label className="form-field"><span>目标用户</span><input value={form.user || ""} onChange={(e) => set("user", e.target.value)} placeholder="谁会付费或采用" /></label></div><label className="form-field"><span>进入触发器</span><textarea value={form.trigger || ""} onChange={(e) => set("trigger", e.target.value)} placeholder="出现什么可观察条件，才值得加大投入？" /></label><label className="form-field"><span>下一步验证</span><input value={form.action || ""} onChange={(e) => set("action", e.target.value)} placeholder="最小、低成本验证" /></label></>}
     {type === "discussion" && <><label className="form-field"><span>类型</span><select value={form.discussionCategory || "研究问题"} onChange={(e) => set("discussionCategory", e.target.value)}><option>研究问题</option><option>反方证据</option><option>行动提案</option><option>复盘</option></select></label><label className="form-field"><span>背景与问题</span><textarea value={form.body || ""} onChange={(e) => set("body", e.target.value)} placeholder="提供背景、证据和希望达成的决定。" /></label></>}
-    <div className="modal-actions"><button type="button" className="button ghost" onClick={close}>取消</button><button type="submit" className="button primary"><Plus size={16} />保存{label}</button></div></form></section></div>;
+    {error && <p className="form-error" role="alert">{error}</p>}<div className="modal-actions"><button type="button" className="button ghost" onClick={close}>取消</button><button type="submit" className="button primary" disabled={saving}><Plus size={16} />{saving ? "保存中…" : `保存${label}`}</button></div></form></section></div>;
 }

@@ -67,3 +67,58 @@ test("business API rejects anonymous and non-owner requests", async () => {
   await anonymous.dispose();
   await nonOwner.dispose();
 });
+
+test("scenario previews stay read-only and record dialogs keep keyboard focus", async ({ browser }) => {
+  const ownerId = `browser-features-${Date.now()}`;
+  const context = await browser.newContext({
+    baseURL: "http://localhost:4173",
+    extraHTTPHeaders: {
+      "oai-authenticated-user-id": ownerId,
+      "oai-authenticated-user-email": "owner@example.com",
+      "oai-authenticated-user-full-name": "Browser%20Features",
+      "oai-authenticated-user-full-name-encoding": "percent-encoded-utf-8",
+    },
+  });
+  const page = await context.newPage();
+  await page.goto("/");
+  await page.getByRole("button", { name: "数据与备份", exact: true }).click();
+  await page.getByRole("button", { name: /导入示例研究/ }).click();
+  await expect(page.getByRole("status")).toContainText("示例研究数据已导入");
+
+  await page.getByRole("button", { name: "2029 预测", exact: true }).click();
+  const before = await (await context.request.get("/api/bootstrap")).json() as { data: { records: Array<{ kind: string; payload: unknown }> } };
+  await page.getByRole("button", { name: /断裂冲击/ }).click();
+  await expect(page.getByRole("status")).toContainText("不会写入真实指标");
+  await expect(page.getByRole("button", { name: /断裂冲击/ })).toHaveAttribute("aria-pressed", "true");
+  const after = await (await context.request.get("/api/bootstrap")).json() as { data: { records: Array<{ kind: string; payload: unknown }> } };
+  expect(after.data.records.filter((record) => record.kind === "indicator").map((record) => record.payload))
+    .toEqual(before.data.records.filter((record) => record.kind === "indicator").map((record) => record.payload));
+
+  const addButton = page.getByRole("button", { name: "新增记录", exact: true });
+  await addButton.click();
+  const dialog = page.getByRole("dialog", { name: "新增行业信号" });
+  await expect(dialog).toBeVisible();
+  await expect.poll(() => page.evaluate(() => document.querySelector("[role='dialog']")?.contains(document.activeElement) ?? false)).toBe(true);
+  await page.keyboard.press("Shift+Tab");
+  await expect.poll(() => page.evaluate(() => document.querySelector("[role='dialog']")?.contains(document.activeElement) ?? false)).toBe(true);
+  await page.keyboard.press("Escape");
+  await expect(dialog).toBeHidden();
+  await expect(addButton).toBeFocused();
+
+  await addButton.click();
+  await page.getByRole("button", { name: "指标", exact: true }).click();
+  await page.getByLabel("标题 *").fill("浏览器验证指标");
+  await page.getByLabel("口径与判断规则").fill("用于验证新增指标流程");
+  await page.getByRole("button", { name: "保存指标", exact: true }).click();
+  await expect(page.getByText("浏览器验证指标", { exact: true })).toBeVisible();
+
+  await addButton.click();
+  await page.getByRole("button", { name: "假设", exact: true }).click();
+  await page.getByLabel("标题 *").fill("浏览器验证假设");
+  await page.getByLabel("可验证陈述 *").fill("在测试窗口内可观察到明确变化");
+  await page.getByLabel("证伪条件 *").fill("没有出现任何连续变化");
+  await page.getByLabel("建立理由 *").fill("验证完整创建流程");
+  await page.getByRole("button", { name: "保存假设", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "浏览器验证假设", exact: true })).toBeVisible();
+  await context.close();
+});

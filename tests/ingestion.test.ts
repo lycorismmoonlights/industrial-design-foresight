@@ -17,6 +17,13 @@ afterEach(() => {
 });
 
 describe("source ingestion and review", () => {
+  it("reports an actual duplicate feed without hiding unrelated database errors", async () => {
+    const ownerId = crypto.randomUUID();
+    await createSource(ownerId, { name: "Original", feedUrl: "https://duplicate.example/feed" });
+    await expect(createSource(ownerId, { name: "Duplicate", feedUrl: "https://duplicate.example/feed" }))
+      .rejects.toMatchObject({ status: 409, code: "SOURCE_ALREADY_EXISTS" });
+  });
+
   it("uses conditional headers and deduplicates by canonical URL even when GUID changes", async () => {
     const ownerId = crypto.randomUUID();
     const source = await createSource(ownerId, { name: "Dedupe feed", feedUrl: "https://dedupe.example/feed" });
@@ -54,6 +61,23 @@ describe("source ingestion and review", () => {
     await expect(updateRecord(ownerId, "owner@example.com", signal.id, 1, { status: "published" })).rejects.toMatchObject({ code: "SIGNAL_QUADRANT_REQUIRED" });
     const published = await updateRecord(ownerId, "owner@example.com", signal.id, 1, { status: "published", payload: { ...signal.payload, quadrant: "制造与材料" } });
     expect(published.status).toBe("published");
+  });
+
+  it("converts an inbox item only once under concurrent review requests", async () => {
+    const ownerId = crypto.randomUUID();
+    const source = await createSource(ownerId, { name: "Concurrent review", feedUrl: "https://concurrent.example/feed" });
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(rss("concurrent-1", "https://concurrent.example/post"), { status: 200 })));
+    await fetchSource(ownerId, source.id);
+    const inbox = await db.prepare("SELECT id FROM inbox_items WHERE owner_id = ? AND review_status = 'pending'").bind(ownerId).first<{ id: string }>();
+    const results = await Promise.allSettled([
+      reviewInboxItem(ownerId, "owner@example.com", inbox!.id, { action: "convert" }),
+      reviewInboxItem(ownerId, "owner@example.com", inbox!.id, { action: "convert" }),
+    ]);
+    expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    expect(results.filter((result) => result.status === "rejected")).toHaveLength(1);
+    const counts = await db.prepare("SELECT (SELECT COUNT(*) FROM records WHERE owner_id = ?) AS records, (SELECT COUNT(*) FROM evidence WHERE owner_id = ?) AS evidence, (SELECT COUNT(*) FROM evidence_links AS link JOIN records AS record ON record.id = link.record_id WHERE record.owner_id = ?) AS links")
+      .bind(ownerId, ownerId, ownerId).first<{ records: number; evidence: number; links: number }>();
+    expect(counts).toMatchObject({ records: 1, evidence: 1, links: 1 });
   });
 
   it("isolates one source failure while other enabled sources continue", async () => {

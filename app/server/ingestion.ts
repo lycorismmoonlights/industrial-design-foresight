@@ -1,9 +1,8 @@
 import { getAppEnv, getD1 } from "../../db";
-import type { EvidenceDto, SourceDto } from "../v2-model";
+import { canonicalPayloadForRecord, type EvidenceDto, type RecordDto, type SourceDto } from "../v2-model";
 import { AppError } from "./errors";
 import { discoverFeedUrl, parseFeed } from "./feed";
 import { assertPublicHttpUrl, safeFetchText } from "./network-safety";
-import { createRecord } from "./repository";
 import {
   ADAPTER_TYPES,
   SOURCE_CADENCES,
@@ -151,12 +150,20 @@ export async function createSource(ownerId: string, input: {
   }
   const timestamp = now();
   const id = uuid();
+  if (feedUrl) {
+    const duplicate = await getD1().prepare("SELECT 1 AS duplicate FROM sources WHERE owner_id = ? AND feed_url = ? LIMIT 1").bind(ownerId, feedUrl).first<Row>();
+    if (duplicate) throw new AppError(409, "SOURCE_ALREADY_EXISTS", "这个订阅地址已经存在。");
+  }
   try {
     await getD1().prepare("INSERT INTO sources (id, owner_id, name, page_url, feed_url, source_type, adapter_type, adapter_config_json, cadence, max_items_per_run, source_category, default_credibility, enabled, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
       .bind(id, ownerId, name, pageUrl, feedUrl, sourceType, adapterType, JSON.stringify(adapterConfig), cadence, maxItemsPerRun, input.sourceCategory?.trim() || "industry_media", oneToFive(input.defaultCredibility ?? 3, "默认可信度"), input.enabled ? 1 : 0, timestamp, timestamp).run();
   } catch (error) {
     if (error instanceof AppError) throw error;
-    throw new AppError(409, "SOURCE_ALREADY_EXISTS", "这个订阅地址已经存在。");
+    const message = error instanceof Error ? error.message : "";
+    if (/unique constraint|idx_sources_owner_feed_url/i.test(message)) {
+      throw new AppError(409, "SOURCE_ALREADY_EXISTS", "这个订阅地址已经存在。");
+    }
+    throw new AppError(500, "SOURCE_CREATE_FAILED", "来源暂时无法保存，请检查数据库迁移状态后重试。");
   }
   return sourceFromRow((await ownedSource(ownerId, id)));
 }
@@ -331,19 +338,21 @@ export async function reviewInboxItem(ownerId: string, actorEmail: string, id: s
   if (!item) throw new AppError(404, "INBOX_ITEM_NOT_FOUND", "待审核条目不存在。");
   if (item.review_status !== "pending") throw new AppError(409, "INBOX_ALREADY_REVIEWED", "这个条目已经审核过。");
   if (input.action === "reject" || input.action === "ignore") {
-    await db.prepare("UPDATE inbox_items SET review_status = ?, reviewed_at = ? WHERE id = ? AND owner_id = ? AND review_status = 'pending'")
+    const result = await db.prepare("UPDATE inbox_items SET review_status = ?, reviewed_at = ? WHERE id = ? AND owner_id = ? AND review_status = 'pending'")
       .bind(input.action === "reject" ? "rejected" : "ignored", now(), id, ownerId).run();
+    if ((result.meta.changes ?? 0) !== 1) throw new AppError(409, "INBOX_ALREADY_REVIEWED", "这个条目已经审核过。");
     return { recordId: null, evidenceId: null };
   }
   if (input.action !== "convert") throw new AppError(400, "INVALID_REVIEW_ACTION", "未知审核动作。");
   const stance = input.stance ?? "context";
   if (!STANCES.has(stance)) throw new AppError(400, "INVALID_STANCE", "证据立场必须是支持、反对或背景。");
-  const record = await createRecord(ownerId, actorEmail, {
-    kind: "signal",
-    status: "draft",
-    title: String(item.title),
-    summary: String(item.summary ?? ""),
-    payload: {
+  const timestamp = now();
+  const recordId = uuid();
+  const evidenceId = uuid();
+  const revisionId = uuid();
+  const title = String(item.title);
+  const summary = String(item.summary ?? "");
+  const payload = canonicalPayloadForRecord("signal", title, summary, {
       title: String(item.title),
       summary: String(item.summary ?? ""),
       quadrant: "",
@@ -353,22 +362,38 @@ export async function reviewInboxItem(ownerId: string, actorEmail: string, id: s
       confidence: 50,
       sourceName: String(item.source_name),
       sourceUrl: item.canonical_url ? String(item.canonical_url) : "",
-      observedAt: item.published_at ? String(item.published_at).slice(0, 10) : now().slice(0, 10),
+      observedAt: item.published_at ? String(item.published_at).slice(0, 10) : timestamp.slice(0, 10),
       tags: [],
-    },
-    changeReason: "由订阅待审核箱转为信号草稿",
   });
-  const timestamp = now();
-  const evidenceId = uuid();
-  await db.batch([
-    db.prepare("INSERT INTO evidence (id, owner_id, title, url, source_name, source_category, credibility, relevance, stance, note, published_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
-      .bind(evidenceId, ownerId, String(item.title), item.canonical_url ?? null, String(item.source_name), input.sourceCategory?.trim() || String(item.source_category), oneToFive(input.credibility ?? item.default_credibility, "可信度"), oneToFive(input.relevance ?? 3, "相关度"), stance, input.note?.trim() ?? "", item.published_at ?? null, timestamp, timestamp),
-    db.prepare("INSERT INTO evidence_links (evidence_id, record_id, relation, created_at) VALUES (?, ?, ?, ?)")
-      .bind(evidenceId, record.id, stance, timestamp),
+  const record: RecordDto = {
+    id: recordId,
+    kind: "signal",
+    status: "draft",
+    title,
+    summary,
+    payload,
+    revision: 1,
+    createdAt: timestamp,
+    updatedAt: timestamp,
+    archivedAt: null,
+    deletedAt: null,
+  };
+  const credibility = oneToFive(input.credibility ?? item.default_credibility, "可信度");
+  const relevance = oneToFive(input.relevance ?? 3, "相关度");
+  const results = await db.batch([
+    db.prepare("INSERT INTO records (id, owner_id, kind, status, title, summary, payload_json, revision, created_at, updated_at, archived_at, deleted_at) SELECT ?, ?, 'signal', 'draft', ?, ?, ?, 1, ?, ?, NULL, NULL FROM inbox_items WHERE id = ? AND owner_id = ? AND review_status = 'pending'")
+      .bind(recordId, ownerId, title, summary, JSON.stringify(payload), timestamp, timestamp, id, ownerId),
+    db.prepare("INSERT INTO record_revisions (id, record_id, owner_id, revision, snapshot_json, change_reason, changed_by, created_at) SELECT ?, ?, ?, 1, ?, '由订阅待审核箱转为信号草稿', ?, ? WHERE EXISTS (SELECT 1 FROM records WHERE id = ? AND owner_id = ?)")
+      .bind(revisionId, recordId, ownerId, JSON.stringify(record), actorEmail, timestamp, recordId, ownerId),
+    db.prepare("INSERT INTO evidence (id, owner_id, title, url, source_name, source_category, credibility, relevance, stance, note, published_at, created_at, updated_at) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM records WHERE id = ? AND owner_id = ?)")
+      .bind(evidenceId, ownerId, title, item.canonical_url ?? null, String(item.source_name), input.sourceCategory?.trim() || String(item.source_category), credibility, relevance, stance, input.note?.trim() ?? "", item.published_at ?? null, timestamp, timestamp, recordId, ownerId),
+    db.prepare("INSERT INTO evidence_links (evidence_id, record_id, relation, created_at) SELECT ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM evidence WHERE id = ? AND owner_id = ?) AND EXISTS (SELECT 1 FROM records WHERE id = ? AND owner_id = ?)")
+      .bind(evidenceId, recordId, stance, timestamp, evidenceId, ownerId, recordId, ownerId),
     db.prepare("UPDATE inbox_items SET review_status = 'converted', reviewed_at = ?, record_id = ? WHERE id = ? AND owner_id = ? AND review_status = 'pending'")
-      .bind(timestamp, record.id, id, ownerId),
+      .bind(timestamp, recordId, id, ownerId),
   ]);
-  return { recordId: record.id, evidenceId };
+  if ((results.at(-1)?.meta.changes ?? 0) !== 1) throw new AppError(409, "INBOX_ALREADY_REVIEWED", "这个条目已经审核过。");
+  return { recordId, evidenceId };
 }
 
 export async function createEvidence(ownerId: string, input: {
