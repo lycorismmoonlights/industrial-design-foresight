@@ -70,7 +70,7 @@ export function ProjectShowcase() {
           <article className="pitch-value"><Microscope /><h3>把研究推进到验证</h3><p>让专业分工落实为可验收的贡献：数据检查、AI 评估、需求访谈与设计机会卡。</p></article>
         </div>
         <div className="pitch-flow" aria-label="研究工作流程">{["来源采集", "AI 辅助整理", "人工审核", "证据与假设", "技能 / 机会行动"].map((label, index) => <div key={label}><span>0{index + 1}</span><strong>{label}</strong>{index < 4 ? <ArrowRight size={15} /> : <Check size={15} />}</div>)}</div>
-        <div className="pitch-foundation"><div><p className="pitch-kicker">已有原型基础</p><h3>系统已经有骨架，下一步需要专业内容。</h3></div><ul><li>来源管理、定时采集与运行记录</li><li>AI 整理、待审核箱与证据关联</li><li>行业雷达、假设、技能与机会记录</li><li>修订历史、导出与每周研究面板</li></ul></div>
+        <div className="pitch-foundation"><div><p className="pitch-kicker">已有原型基础</p><h3>系统已经有骨架，下一步需要专业内容。</h3></div><ul><li>来源管理、定时采集与运行记录</li><li>AI 整理、待审核箱与证据关联</li><li>经济与产业雷达、假设、技能与机会记录</li><li>修订历史、导出与每周研究面板</li></ul></div>
         <p className="pitch-footnote">当前定位：单所有者研究原型。代码已具备上述模块；接口在线运行依赖相应配置。多人账号、团队权限和持续研究成效仍待后续验证。</p>
       </section>
 
@@ -114,7 +114,7 @@ export function ProjectShowcase() {
 
       <section id="questions" className="pitch-section pitch-questions">
         <SectionHeading index="06" eyebrow="QUESTIONS WORTH ASKING" title="把值得追问的地方，先说清楚。" text="一个可信的邀请，也需要明确研究边界与当前阶段。" />
-        <div className="pitch-faq-grid"><article><h3>和普通信息汇总有什么区别？</h3><p>把资料关联到具体假设、反方证据和行动条件，并保留修改理由。价值需要用试点中的决策记录来检验。</p></article><article><h3>一定要相信“2029 危机”吗？</h3><p>不需要。2029 与危机后 6–12 个月是原项目保留的可证伪情景；团队可以比较多种情景，研究价值来自持续修正。</p></article><article><h3>AI 做什么，人做什么？</h3><p>AI 辅助摘要、分类与关联建议；同学检查原文、反证和专业约束，项目负责人审核，不自动发布正式判断。</p></article><article><h3>现在能直接多人协作吗？</h3><p>当前系统是单所有者版本。首轮采用模板提交与集中审核；多人账号和细分权限属于后续建设项。</p></article><article><h3>能保证论文、竞赛或学分吗？</h3><p>不能预先承诺。先形成可追溯的研究过程与成果，再由相关老师按课程或项目要求判断适用路径。</p></article><article><h3>已经证明有效了吗？</h3><p>目前具备软件原型与展示案例。尚无跨学院试点成效、用户增长或商业收入数据；首轮共研就是验证这一层价值。</p></article></div>
+        <div className="pitch-faq-grid"><article><h3>和普通信息汇总有什么区别？</h3><p>把资料关联到具体假设、反方证据和行动条件，并保留修改理由。价值需要用试点中的决策记录来检验。</p></article><article><h3>经济数据会直接得出设计结论吗？</h3><p>不会。系统先记录增长、产出、就业、价格、融资与企业经营，再用订单、招聘和项目证据验证它们如何传导到设计需求。</p></article><article><h3>AI 做什么，人做什么？</h3><p>AI 辅助摘要、分类与关联建议；同学检查原文、反证和专业约束，项目负责人审核，不自动发布正式判断。</p></article><article><h3>现在能直接多人协作吗？</h3><p>当前系统是单所有者版本。首轮采用模板提交与集中审核；多人账号和细分权限属于后续建设项。</p></article><article><h3>能保证论文、竞赛或学分吗？</h3><p>不能预先承诺。先形成可追溯的研究过程与成果，再由相关老师按课程或项目要求判断适用路径。</p></article><article><h3>已经证明有效了吗？</h3><p>目前具备软件原型与展示案例。尚无跨学院试点成效、用户增长或商业收入数据；首轮共研就是验证这一层价值。</p></article></div>
         <div className="pitch-sources"><strong>资料与核验</strong><p><a href={sourceUrl} target="_blank" rel="noreferrer">[1] 欧盟委员会 · ESPR 官方说明 <ArrowUpRight size={12} /></a><span>规则背景与适用边界，非需求证明。</span></p><p><a href="https://www.bls.gov/ooh/arts-and-design/industrial-designers.htm" target="_blank" rel="noreferrer">[2] 美国 BLS · Industrial Designers <ArrowUpRight size={12} /></a><span>职业职责涉及设计、工程与商业协作；不能直接外推中国就业。</span></p><small>公开来源查阅：2026-09-14。功能说明以本项目代码为依据；试点规模、人员与成果数量均为建议。</small></div>
         <footer className="pitch-footer"><span>工业设计前瞻站 / 跨学院共研计划</span><Link href="/">进入私有研究工作台 <ArrowUpRight size={13} /></Link><a href="#pitch-main">返回顶部 ↑</a></footer>
       </section>

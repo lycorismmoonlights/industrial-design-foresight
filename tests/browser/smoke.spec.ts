@@ -6,7 +6,7 @@ test("owner research flow persists in D1 and remains usable on mobile", async ({
     if (message.type() === "error") consoleErrors.push(message.text());
   });
   await page.goto("/");
-  await expect(page.getByRole("heading", { name: "工业设计前瞻总览" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "经济与产业前瞻总览" })).toBeVisible();
   await expect(page.locator("[data-nextjs-dialog], .vite-error-overlay")).toHaveCount(0);
 
   await page.getByRole("button", { name: "来源管理", exact: true }).click();
@@ -85,11 +85,11 @@ test("scenario previews stay read-only and record dialogs keep keyboard focus", 
   await page.getByRole("button", { name: /导入示例研究/ }).click();
   await expect(page.getByRole("status")).toContainText("示例研究数据已导入");
 
-  await page.getByRole("button", { name: "2029 预测", exact: true }).click();
+  await page.getByRole("button", { name: "经济周期推演", exact: true }).click();
   const before = await (await context.request.get("/api/bootstrap")).json() as { data: { records: Array<{ kind: string; payload: unknown }> } };
-  await page.getByRole("button", { name: /断裂冲击/ }).click();
+  await page.getByRole("button", { name: /衰退冲击/ }).click();
   await expect(page.getByRole("status")).toContainText("不会写入真实指标");
-  await expect(page.getByRole("button", { name: /断裂冲击/ })).toHaveAttribute("aria-pressed", "true");
+  await expect(page.getByRole("button", { name: /衰退冲击/ })).toHaveAttribute("aria-pressed", "true");
   const after = await (await context.request.get("/api/bootstrap")).json() as { data: { records: Array<{ kind: string; payload: unknown }> } };
   expect(after.data.records.filter((record) => record.kind === "indicator").map((record) => record.payload))
     .toEqual(before.data.records.filter((record) => record.kind === "indicator").map((record) => record.payload));

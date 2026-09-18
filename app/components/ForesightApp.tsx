@@ -61,8 +61,8 @@ type ModalType = "signal" | "indicator" | "hypothesis" | "skill" | "opportunity"
 
 const NAV: Array<{ id: ViewId; label: string; icon: LucideIcon; group?: string }> = [
   { id: "dashboard", label: "研究总览", icon: LayoutDashboard, group: "工作台" },
-  { id: "radar", label: "行业雷达", icon: Radar },
-  { id: "forecast", label: "2029 预测", icon: BrainCircuit },
+  { id: "radar", label: "经济与产业雷达", icon: Radar },
+  { id: "forecast", label: "经济周期推演", icon: BrainCircuit },
   { id: "skills", label: "技能库", icon: GraduationCap, group: "准备与进入" },
   { id: "opportunities", label: "机会库", icon: BriefcaseBusiness },
   { id: "discussions", label: "讨论与决策", icon: MessageSquareText, group: "协作与维护" },
@@ -75,9 +75,9 @@ const NAV: Array<{ id: ViewId; label: string; icon: LucideIcon; group?: string }
 ];
 
 const VIEW_COPY: Record<ViewId, { eyebrow: string; title: string; description: string }> = {
-  dashboard: { eyebrow: "研究工作台", title: "工业设计前瞻总览", description: "把行业信号、核心假设、能力储备和入场动作放在同一条证据链上。" },
-  radar: { eyebrow: "持续扫描", title: "工业设计行业雷达", description: "按影响领域与行动成熟度组织信号；越靠中心，越需要投入行动。" },
-  forecast: { eyebrow: "核心研究假设", title: "2029 危机与复苏推演", description: "年份和恢复周期是待验证假设。用反方证据和触发器管理不确定性。" },
+  dashboard: { eyebrow: "研究工作台", title: "经济与产业前瞻总览", description: "把宏观经济、制造业、企业经营与工业设计机会放在同一条证据链上。" },
+  radar: { eyebrow: "持续扫描", title: "经济与产业信号雷达", description: "经济指标作为上游证据，继续追踪它们向制造、产品需求与设计任务的传导。" },
+  forecast: { eyebrow: "核心研究假设", title: "经济周期与产业传导推演", description: "用滚动经济指标、反方证据和触发器管理判断，不押注单一年份。" },
   skills: { eyebrow: "可迁移能力", title: "技能储备库", description: "用可验证成果而不是“学过”管理技能，优先补齐危机中仍有价值的能力。" },
   opportunities: { eyebrow: "进入准备", title: "机会窗口库", description: "分别管理现在、危机期和复苏窗口的进入条件，避免把趋势等同于机会。" },
   discussions: { eyebrow: "研究协作", title: "讨论与决策", description: "区分开放讨论、反方证据和正式决定，让研究过程可追溯。" },
@@ -315,7 +315,7 @@ export function ForesightApp({ initialUser }: { initialUser: InitialUser }) {
           </div>
 
           {research.error && <div className="inline-error">{research.error}<button onClick={() => void research.refresh()}>重试</button></div>}
-          {!research.records.length && ["dashboard", "radar", "forecast", "skills", "opportunities", "discussions"].includes(activeView) && <section className="empty-cloud"><Database size={24} /><div><h2>研究库目前为空</h2><p>导入旧版备份或示例数据后，即可继续使用雷达、预测、技能和机会功能。</p></div><button className="button secondary" onClick={() => navigate("data")}>前往导入</button></section>}
+          {!research.records.length && ["dashboard", "radar", "forecast", "skills", "opportunities", "discussions"].includes(activeView) && <section className="empty-cloud"><Database size={24} /><div><h2>研究库目前为空</h2><p>导入经济基线示例后，即可使用雷达、周期推演、技能和机会功能。</p></div><button className="button secondary" onClick={() => navigate("data")}>前往导入</button></section>}
 
           {activeView === "dashboard" && (
             <DashboardView store={displayStore} phase={phase} signals={searchSignals} navigate={navigate} applyScenario={applyScenario} />
@@ -354,9 +354,9 @@ function DashboardView({ store, phase, signals, navigate, applyScenario }: { sto
       <section className="scenario-hero">
         <div className="hero-copy">
           <div className="hero-kicker"><Sparkles size={15} />核心研究情景</div>
-          <h2>2029 左右可能破裂，<br /><span>6–12 个月或出现复苏窗口</span></h2>
-          <p>这不是结论，而是系统的压力测试基线。所有准备动作必须同时回答：如果年份偏移、恢复更慢，能力是否仍然有用？</p>
-          <div className="hero-actions"><button className="button light" onClick={() => navigate("forecast")}>查看假设与反证 <ArrowRight size={16} /></button><button className="text-button" onClick={() => applyScenario("rupture")}>演示断裂情景</button></div>
+          <h2>以经济周期为主线，<br /><span>追踪制造与设计需求的传导</span></h2>
+          <p>系统先看增长、产出、就业、通胀、融资与资本开支，再判断工业设计需求是收缩、滞后还是出现结构性机会。</p>
+          <div className="hero-actions"><button className="button light" onClick={() => navigate("forecast")}>查看假设与反证 <ArrowRight size={16} /></button><button className="text-button" onClick={() => applyScenario("rupture")}>演示衰退情景</button></div>
         </div>
         <div className="hero-metrics">
           <div className="pressure-gauge" style={{ "--value": `${phase.pressure * 3.6}deg` } as React.CSSProperties}>
@@ -390,7 +390,7 @@ function DashboardView({ store, phase, signals, navigate, applyScenario }: { sto
           <PanelTitle eyebrow="本周队列" title="下一步最小动作" />
           <div className="task-list">
             {[
-              ["补 1 条反方证据", "2029 假设", "forecast"],
+              ["补 1 条反方证据", "经济周期假设", "forecast"],
               ["完成小家电逆向拆解", "结构 / DFM", "skills"],
               ["验证降本改造触发器", "机会 04", "opportunities"],
             ].map(([title, meta, view], index) => (
@@ -461,9 +461,9 @@ function RadarView({ signals, openAdd }: { signals: Signal[]; openAdd: () => voi
 function ForecastView({ store, phase, updateIndicator, applyScenario, activeScenario, resetScenario }: { store: ResearchStore; phase: ReturnType<typeof calculatePhase>; updateIndicator: (id: string, patch: Partial<Indicator>) => void; applyScenario: (key: keyof typeof scenarioPresets) => void; activeScenario: keyof typeof scenarioPresets | null; resetScenario: () => void }) {
   return <div className="view-stack">
     <section className="forecast-summary">
-      <div className="forecast-year"><span>核心节点</span><strong>2029</strong><p>研究窗口：2028 Q2 — 2030 Q1</p></div>
+      <div className="forecast-year"><span>滚动观察窗</span><strong>4–8Q</strong><p>每月更新数据，每季度复核假设</p></div>
       <div className="forecast-arrow"><ArrowRight /></div>
-      <div className="forecast-window"><span>预测恢复周期</span><strong>6–12 <small>个月</small></strong><p>若 12 个月无连续改善，必须修正假设</p></div>
+      <div className="forecast-window"><span>设计需求可能滞后</span><strong>1–3 <small>季度</small></strong><p>领先指标改善后仍需订单与招聘验证</p></div>
       <div className={`forecast-phase ${phase.accent}`}><span>当前情景输出</span><strong>{phase.phase} · {phase.label}</strong><p>压力 {phase.pressure} / 100 · {phase.posture}</p></div>
     </section>
 
@@ -482,9 +482,9 @@ function ForecastView({ store, phase, updateIndicator, applyScenario, activeScen
     </section>
 
     <section className="panel">
-      <PanelTitle eyebrow="手动校准" title="危机指标面板" action={<span className="formula-note"><Gauge size={14} />加权规则 · 仅用于情景比较</span>} />
+      <PanelTitle eyebrow="手动校准" title="经济指标面板" action={<span className="formula-note"><Gauge size={14} />加权规则 · 仅用于情景比较</span>} />
       <div className="indicator-list">{store.indicators.map((item) => <div className="indicator-row" key={item.id}><div className="indicator-name"><strong>{item.label}</strong><span>{item.category} · 权重 {item.weight.toFixed(1)}</span><p>{item.note}</p></div><div className="score-control" aria-label={`${item.label}评分`}>{([-2, -1, 0, 1, 2] as const).map((value) => <button key={value} className={item.value === value ? "active" : ""} onClick={() => updateIndicator(item.id, { value })}>{value > 0 ? `+${value}` : value}</button>)}</div><select value={item.direction} onChange={(event) => updateIndicator(item.id, { direction: Number(event.target.value) as Indicator["direction"] })} aria-label={`${item.label}趋势`}><option value={1}>↗ 改善</option><option value={0}>→ 持平</option><option value={-1}>↘ 恶化</option></select></div>)}</div>
-      <div className="method-note"><ShieldCheck size={18} /><p><strong>边界：</strong>模型输出是行动提示，不是金融预测。关键判断需同时保留原始来源、反方证据和修正日期。</p></div>
+      <div className="method-note"><ShieldCheck size={18} /><p><strong>边界：</strong>模型输出用于研究与行动提示，不构成投资建议。关键判断需保留原始数据、反方证据和修正日期。</p></div>
     </section>
   </div>;
 }
@@ -540,7 +540,7 @@ function DataView({ store, records, exportData, importData, restoreData, canRest
   const [historyFor, setHistoryFor] = useState<RecordDto | null>(null);
   const [history, setHistory] = useState<RevisionDto[]>([]);
   const collections = [
-    ["行业信号", store.signals.length, Radar], ["预测假设", store.hypotheses.length, BrainCircuit], ["技能记录", store.skills.length, GraduationCap], ["机会条目", store.opportunities.length, Target], ["讨论/决策", store.discussions.length, MessageSquareText],
+    ["经济/产业信号", store.signals.length, Radar], ["周期假设", store.hypotheses.length, BrainCircuit], ["技能记录", store.skills.length, GraduationCap], ["机会条目", store.opportunities.length, Target], ["讨论/决策", store.discussions.length, MessageSquareText],
   ] as const;
   async function openHistory(record: RecordDto) {
     setHistoryFor(record);

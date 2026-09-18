@@ -12,22 +12,73 @@ import { SourceEditor } from "./SourceEditor";
 type Research = ReturnType<typeof useResearchData>;
 type Notify = (action: () => Promise<unknown>, success: string) => void;
 
-const SOURCE_PRESETS = [
+interface SourcePreset {
+  name: string;
+  pageUrl?: string;
+  feedUrl?: string | null;
+  adapterType?: SourceDto["adapterType"];
+  adapterConfig?: Record<string, unknown>;
+  cadence?: SourceDto["cadence"];
+  maxItemsPerRun?: number;
+  sourceCategory: string;
+  defaultCredibility: number;
+  note: string;
+}
+
+const SOURCE_PRESETS: SourcePreset[] = [
+  {
+    name: "Eurostat 欧盟宏观与制造业",
+    pageUrl: "https://ec.europa.eu/eurostat/",
+    adapterType: "eurostat",
+    adapterConfig: {
+      queries: [
+        { dataset: "sts_inpr_m", label: "欧盟制造业产出指数", recentPeriods: 18, filters: { freq: "M", indic_bt: "PRD", nace_r2: "C", s_adj: "SCA", unit: "I21", geo: "EU27_2020" } },
+        { dataset: "namq_10_gdp", label: "欧盟实际 GDP", recentPeriods: 8, filters: { freq: "Q", unit: "CLV10_MEUR", s_adj: "SCA", na_item: "B1GQ", geo: "EU27_2020" } },
+        { dataset: "prc_hicp_midx", label: "欧盟 HICP", recentPeriods: 18, filters: { freq: "M", unit: "I15", coicop: "CP00", geo: "EU27_2020" } },
+      ],
+    },
+    cadence: "monthly",
+    maxItemsPerRun: 80,
+    sourceCategory: "economic_data",
+    defaultCredibility: 5,
+    note: "欧盟官方宏观数据：实际 GDP、制造业产出与消费价格；按滚动观察期抓取。",
+  },
+  {
+    name: "BLS 美国制造业与劳动力",
+    pageUrl: "https://www.bls.gov/data/",
+    adapterType: "bls",
+    adapterConfig: {
+      series: [
+        { id: "CES3000000001", label: "美国制造业就业" },
+        { id: "CUSR0000SA0", label: "美国 CPI" },
+        { id: "LNS14000000", label: "美国失业率" },
+        { id: "CES0500000003", label: "美国私营非农平均时薪" },
+      ],
+    },
+    cadence: "monthly",
+    maxItemsPerRun: 60,
+    sourceCategory: "economic_data",
+    defaultCredibility: 5,
+    note: "美国官方劳动力与价格数据，覆盖制造业就业、失业率、CPI 与工资。",
+  },
+  {
+    name: "EU DG GROW Publications",
+    pageUrl: "https://single-market-economy.ec.europa.eu/rss_en",
+    feedUrl: "https://single-market-economy.ec.europa.eu/node/3/rss_en",
+    adapterType: "rss",
+    adapterConfig: { enrichment: "eu_publication", maxDetailPagesPerRun: 5, maxAttachmentsPerItem: 4 },
+    maxItemsPerRun: 60,
+    sourceCategory: "government",
+    defaultCredibility: 5,
+    note: "欧盟工业政策一手发布；自动进入详情页，把可下载 PDF 作为独立证据条目保存。",
+  },
   {
     name: "Core77",
     pageUrl: "https://www.core77.com/about",
     feedUrl: "https://feeds.feedburner.com/core77/blog",
     sourceCategory: "industry_media",
     defaultCredibility: 3,
-    note: "工业设计媒体；适合发现产品、材料、工具和从业实践信号。",
-  },
-  {
-    name: "EU DG GROW Publications",
-    pageUrl: "https://single-market-economy.ec.europa.eu/rss_en",
-    feedUrl: "https://single-market-economy.ec.europa.eu/node/3/rss_en",
-    sourceCategory: "government",
-    defaultCredibility: 5,
-    note: "欧盟单一市场、工业、企业与制造政策的一手发布。",
+    note: "工业设计媒体；用于补充产品与从业信号，优先级低于官方经济数据。",
   },
   {
     name: "WIPO News",
@@ -37,7 +88,7 @@ const SOURCE_PRESETS = [
     defaultCredibility: 5,
     note: "保留为网页/人工来源；系统会尝试发现订阅，但不虚构未确认的通用 feed。",
   },
-] as const;
+];
 
 type SourceFilter = "all" | "attention" | "disabled";
 type AddSourceMode = "preset" | "feed" | "api" | "page";
@@ -127,7 +178,7 @@ function AddSourceDialog({ research, notify, close, created }: {
       name,
       adapterType: adapter,
       adapterConfig: adapterConfig(adapter, identifier.trim(), name.trim()),
-      sourceCategory: adapter === "sec" ? "corporate_filings" : adapter === "eurostat" ? "government" : "economic_data",
+      sourceCategory: adapter === "sec" ? "corporate_filings" : "economic_data",
       enabled: false,
     }), "API 来源已添加，请先测试连接再启用");
   }
@@ -229,10 +280,19 @@ export function SourcesView({ research, notify }: { research: Research; notify: 
   </div>;
 }
 
+function isDownloadableDocument(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    return parsed.pathname.includes("/document/download/") || /\.pdf$/i.test(parsed.pathname) || /\.pdf$/i.test(parsed.searchParams.get("filename") ?? "");
+  } catch {
+    return false;
+  }
+}
+
 function ReviewCard({ item, review }: { item: InboxItemDto; review: (input: Parameters<Research["reviewInbox"]>[1]) => void }) {
   const [relevance, setRelevance] = useState(item.aiRelevance ?? 3);
   const [stance, setStance] = useState<EvidenceDto["stance"]>(item.aiStanceSuggestion ?? "context");
-  return <article className="inbox-card"><div className="inbox-copy"><span>{item.publishedAt ? new Date(item.publishedAt).toLocaleDateString("zh-CN") : "日期未知"}</span><h2>{item.title}</h2><p>{item.summary || "此条目没有摘要，请打开原文后人工判断。"}</p>{item.aiStatus === "completed" && <div className="ai-suggestion"><small>AI 整理建议 · {item.aiQuadrant} · 相关度 {item.aiRelevance}/5</small><p>{item.aiSummary}</p>{item.aiTags.length > 0 && <span>{item.aiTags.join(" · ")}</span>}</div>}{item.canonicalUrl && <a href={item.canonicalUrl} target="_blank" rel="noreferrer">查看原文 <ExternalLink size={13} /></a>}</div><aside><label>相关度<select value={relevance} onChange={(event) => setRelevance(Number(event.target.value))}>{[1, 2, 3, 4, 5].map((value) => <option key={value}>{value}</option>)}</select></label><label>立场<select value={stance} onChange={(event) => setStance(event.target.value as EvidenceDto["stance"])}><option value="supports">支持</option><option value="opposes">反对</option><option value="context">背景</option></select></label><button className="button primary compact" onClick={() => review({ action: "convert", relevance, stance })}>转为信号草稿</button><div><button onClick={() => review({ action: "ignore" })}>忽略</button><button onClick={() => review({ action: "reject" })}>拒绝</button></div></aside></article>;
+  return <article className="inbox-card"><div className="inbox-copy"><span>{item.publishedAt ? new Date(item.publishedAt).toLocaleDateString("zh-CN") : "日期未知"}</span><h2>{item.title}</h2><p>{item.summary || "此条目没有摘要，请打开原文后人工判断。"}</p>{item.aiStatus === "completed" && <div className="ai-suggestion"><small>AI 整理建议 · {item.aiQuadrant} · 相关度 {item.aiRelevance}/5</small><p>{item.aiSummary}</p>{item.aiTags.length > 0 && <span>{item.aiTags.join(" · ")}</span>}</div>}{item.canonicalUrl && <a href={item.canonicalUrl} target="_blank" rel="noreferrer">{isDownloadableDocument(item.canonicalUrl) ? "下载文件" : "查看原文"} <ExternalLink size={13} /></a>}</div><aside><label>相关度<select value={relevance} onChange={(event) => setRelevance(Number(event.target.value))}>{[1, 2, 3, 4, 5].map((value) => <option key={value}>{value}</option>)}</select></label><label>立场<select value={stance} onChange={(event) => setStance(event.target.value as EvidenceDto["stance"])}><option value="supports">支持</option><option value="opposes">反对</option><option value="context">背景</option></select></label><button className="button primary compact" onClick={() => review({ action: "convert", relevance, stance })}>转为信号草稿</button><div><button onClick={() => review({ action: "ignore" })}>忽略</button><button onClick={() => review({ action: "reject" })}>拒绝</button></div></aside></article>;
 }
 
 export function InboxView({ research, notify }: { research: Research; notify: Notify }) {
@@ -287,7 +347,7 @@ export function EvidenceView({ research, notify }: { research: Research; notify:
     event.preventDefault();
     notify(() => research.createEvidence({ ...form, credibility: Number(form.credibility), relevance: Number(form.relevance), stance: form.stance as EvidenceDto["stance"], url: form.url || null, recordId: form.recordId || null }).then(() => setForm((current) => ({ ...current, title: "", url: "" }))), "证据已保存并关联");
   }
-  return <div className="view-stack"><section className="two-column equal"><form className="panel ops-form" onSubmit={submit}><div className="panel-title"><div><p>EVIDENCE</p><h2>添加结构化证据</h2></div></div><label className="form-field"><span>标题</span><input required value={form.title} onChange={(event) => setForm({ ...form, title: event.target.value })} /></label><div className="form-grid"><label className="form-field"><span>来源名称</span><input required value={form.sourceName} onChange={(event) => setForm({ ...form, sourceName: event.target.value })} /></label><label className="form-field"><span>来源类别</span><input required value={form.sourceCategory} onChange={(event) => setForm({ ...form, sourceCategory: event.target.value })} /></label></div><label className="form-field"><span>原文 URL（可选）</span><input type="url" value={form.url} onChange={(event) => setForm({ ...form, url: event.target.value })} /></label><div className="form-grid"><label className="form-field"><span>可信度 1–5</span><select value={form.credibility} onChange={(event) => setForm({ ...form, credibility: event.target.value })}>{[1, 2, 3, 4, 5].map((value) => <option key={value}>{value}</option>)}</select></label><label className="form-field"><span>相关度 1–5</span><select value={form.relevance} onChange={(event) => setForm({ ...form, relevance: event.target.value })}>{[1, 2, 3, 4, 5].map((value) => <option key={value}>{value}</option>)}</select></label></div><div className="form-grid"><label className="form-field"><span>立场</span><select value={form.stance} onChange={(event) => setForm({ ...form, stance: event.target.value })}><option value="supports">支持</option><option value="opposes">反对</option><option value="context">背景</option></select></label><label className="form-field"><span>关联研究记录</span><select value={form.recordId} onChange={(event) => setForm({ ...form, recordId: event.target.value })}><option value="">暂不关联</option>{linkable.map((record) => <option key={record.id} value={record.id}>{record.kind} · {record.title}</option>)}</select></label></div><button className="button primary" type="submit"><Plus size={15} />保存证据</button></form><section className="panel ops-panel"><div className="panel-title"><div><p>INTERPRETATION</p><h2>证据强度提示</h2></div></div><div className="evidence-rule"><strong>可信度 × 相关度</strong><p>分值帮助你发现薄弱证据，但绝不自动修改 2029 假设或其他假设的主观置信度。</p></div><div className="evidence-rule"><strong>支持 / 反对 / 背景</strong><p>反方证据与支持证据同等可见，避免只收藏符合预期的资料。</p></div></section></section><section className="evidence-library">{research.data.evidence.map((item) => <article className="panel" key={item.id}><div><span className={`stance ${item.stance}`}>{item.stance === "supports" ? "支持" : item.stance === "opposes" ? "反对" : "背景"}</span><strong>{item.title}</strong></div><p>{item.sourceName} · {item.sourceCategory}</p><div className="evidence-scores"><span>可信 {item.credibility}/5</span><span>相关 {item.relevance}/5</span><span>提示强度 {item.credibility * item.relevance}/25</span></div><small><Link2 size={12} />已关联 {item.links.length} 条记录</small></article>)}</section></div>;
+  return <div className="view-stack"><section className="two-column equal"><form className="panel ops-form" onSubmit={submit}><div className="panel-title"><div><p>EVIDENCE</p><h2>添加结构化证据</h2></div></div><label className="form-field"><span>标题</span><input required value={form.title} onChange={(event) => setForm({ ...form, title: event.target.value })} /></label><div className="form-grid"><label className="form-field"><span>来源名称</span><input required value={form.sourceName} onChange={(event) => setForm({ ...form, sourceName: event.target.value })} /></label><label className="form-field"><span>来源类别</span><input required value={form.sourceCategory} onChange={(event) => setForm({ ...form, sourceCategory: event.target.value })} /></label></div><label className="form-field"><span>原文 URL（可选）</span><input type="url" value={form.url} onChange={(event) => setForm({ ...form, url: event.target.value })} /></label><div className="form-grid"><label className="form-field"><span>可信度 1–5</span><select value={form.credibility} onChange={(event) => setForm({ ...form, credibility: event.target.value })}>{[1, 2, 3, 4, 5].map((value) => <option key={value}>{value}</option>)}</select></label><label className="form-field"><span>相关度 1–5</span><select value={form.relevance} onChange={(event) => setForm({ ...form, relevance: event.target.value })}>{[1, 2, 3, 4, 5].map((value) => <option key={value}>{value}</option>)}</select></label></div><div className="form-grid"><label className="form-field"><span>立场</span><select value={form.stance} onChange={(event) => setForm({ ...form, stance: event.target.value as EvidenceDto["stance"] })}><option value="supports">支持</option><option value="opposes">反对</option><option value="context">背景</option></select></label><label className="form-field"><span>关联研究记录</span><select value={form.recordId} onChange={(event) => setForm({ ...form, recordId: event.target.value })}><option value="">暂不关联</option>{linkable.map((record) => <option key={record.id} value={record.id}>{record.kind} · {record.title}</option>)}</select></label></div><button className="button primary" type="submit"><Plus size={15} />保存证据</button></form><section className="panel ops-panel"><div className="panel-title"><div><p>INTERPRETATION</p><h2>证据强度提示</h2></div></div><div className="evidence-rule"><strong>可信度 × 相关度</strong><p>分值帮助你发现薄弱证据，但绝不自动修改经济周期假设或其他判断的主观置信度。</p></div><div className="evidence-rule"><strong>支持 / 反对 / 背景</strong><p>反方证据与支持证据同等可见，避免只收藏符合预期的资料。</p></div></section></section><section className="evidence-library">{research.data.evidence.map((item) => <article className="panel" key={item.id}><div><span className={`stance ${item.stance}`}>{item.stance === "supports" ? "支持" : item.stance === "opposes" ? "反对" : "背景"}</span><strong>{item.title}</strong></div><p>{item.sourceName} · {item.sourceCategory}</p><div className="evidence-scores"><span>可信 {item.credibility}/5</span><span>相关 {item.relevance}/5</span><span>提示强度 {item.credibility * item.relevance}/25</span></div><small><Link2 size={12} />已关联 {item.links.length} 条记录</small></article>)}</section></div>;
 }
 
 export function WeeklyView({ research, navigate, notify }: { research: Research; navigate: (view: "sources" | "inbox" | "evidence" | "skills" | "opportunities") => void; notify: Notify }) {
