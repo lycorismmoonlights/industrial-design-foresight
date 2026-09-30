@@ -123,6 +123,27 @@ export function titleForV1(kind: RecordKind, payload: Record<string, unknown>): 
   return String(payload.title ?? `未命名${kind}`);
 }
 
+export function summaryForV1(kind: RecordKind, payload: Record<string, unknown>): string {
+  if (kind === "hypothesis") return String(payload.statement ?? "");
+  if (kind === "indicator") return String(payload.note ?? "");
+  if (kind === "discussion") return String(payload.body ?? "");
+  return String(payload.summary ?? payload.nextAction ?? payload.trigger ?? "");
+}
+
+export function canonicalPayloadForRecord(
+  kind: RecordKind,
+  title: string,
+  summary: string,
+  payload: Record<string, unknown>,
+): Record<string, unknown> {
+  if (kind === "indicator") return { ...payload, label: title, note: summary };
+  if (kind === "hypothesis") return { ...payload, title, statement: summary };
+  if (kind === "skill") return { ...payload, name: title, nextAction: summary };
+  if (kind === "opportunity") return { ...payload, title, trigger: summary };
+  if (kind === "discussion") return { ...payload, title, body: summary };
+  return { ...payload, title, summary };
+}
+
 export function recordsToV1(records: RecordDto[]): ResearchStore {
   const store: ResearchStore = {
     version: 1,
@@ -137,7 +158,10 @@ export function recordsToV1(records: RecordDto[]): ResearchStore {
 
   for (const record of records.filter((item) => !item.deletedAt && item.status === "published")) {
     const collection = V1_COLLECTIONS[record.kind];
-    const legacy = { ...record.payload, id: record.id };
+    const legacy = {
+      ...canonicalPayloadForRecord(record.kind, record.title, record.summary, record.payload),
+      id: record.id,
+    };
     (store[collection] as unknown as Array<Record<string, unknown>>).push(legacy);
   }
   return store;

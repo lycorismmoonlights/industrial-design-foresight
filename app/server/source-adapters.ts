@@ -245,6 +245,19 @@ function eurostatDate(value: string): string | null {
   return null;
 }
 
+function recentPeriodStart(frequency: string, recentPeriods: number, current = new Date()): string {
+  if (frequency === "M") {
+    const date = new Date(Date.UTC(current.getUTCFullYear(), current.getUTCMonth() - recentPeriods + 1, 1));
+    return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, "0")}`;
+  }
+  if (frequency === "Q") {
+    const currentQuarter = Math.floor(current.getUTCMonth() / 3);
+    const startQuarterIndex = current.getUTCFullYear() * 4 + currentQuarter - recentPeriods + 1;
+    return `${Math.floor(startQuarterIndex / 4)}-Q${(startQuarterIndex % 4) + 1}`;
+  }
+  return String(current.getUTCFullYear() - recentPeriods + 1);
+}
+
 async function fetchEurostat(definition: ApiSourceDefinition, _appEnv: AppEnv, fetcher: typeof fetch): Promise<NormalizedSourceItem[]> {
   const config = asObject(definition.adapterConfig);
   if (!Array.isArray(config.queries) || config.queries.length === 0 || config.queries.length > 10) {
@@ -258,6 +271,18 @@ async function fetchEurostat(definition: ApiSourceDefinition, _appEnv: AppEnv, f
     const label = String(query.label ?? dataset).trim().slice(0, 200) || dataset;
     const url = new URL(`https://ec.europa.eu/eurostat/api/dissemination/statistics/1.0/data/${dataset}`);
     url.searchParams.set("lang", "en");
+    if (query.recentPeriods !== undefined) {
+      const recentPeriods = Number(query.recentPeriods);
+      if (!Number.isInteger(recentPeriods) || recentPeriods < 1 || recentPeriods > 60) {
+        throw new AppError(400, "INVALID_ADAPTER_CONFIG", "Eurostat recentPeriods 必须是 1–60 的整数。");
+      }
+      const filters = query.filters === undefined ? {} : asObject(query.filters, "Eurostat filters");
+      const frequency = String(filters.freq ?? "A").toUpperCase();
+      if (!["A", "Q", "M"].includes(frequency)) {
+        throw new AppError(400, "INVALID_ADAPTER_CONFIG", "Eurostat recentPeriods 仅支持年、季度或月度频率。");
+      }
+      url.searchParams.set("sinceTimePeriod", recentPeriodStart(frequency, recentPeriods));
+    }
     if (query.filters !== undefined) {
       const filters = asObject(query.filters, "Eurostat filters");
       for (const [key, rawValue] of Object.entries(filters)) {
@@ -332,8 +357,30 @@ export function validateAdapterConfig(adapterType: SourceDto["adapterType"], val
       throw new AppError(400, "INVALID_ADAPTER_CONFIG", "companies 必须包含 1–10 项。");
     }
   }
-  if (adapterType === "eurostat" && (!Array.isArray(config.queries) || config.queries.length === 0 || config.queries.length > 10)) {
-    throw new AppError(400, "INVALID_ADAPTER_CONFIG", "queries 必须包含 1–10 项。");
+  if (adapterType === "eurostat") {
+    if (!Array.isArray(config.queries) || config.queries.length === 0 || config.queries.length > 10) {
+      throw new AppError(400, "INVALID_ADAPTER_CONFIG", "queries 必须包含 1–10 项。");
+    }
+    for (const rawQuery of config.queries) {
+      const query = asObject(rawQuery, "Eurostat query");
+      if (query.recentPeriods !== undefined) {
+        const recentPeriods = Number(query.recentPeriods);
+        if (!Number.isInteger(recentPeriods) || recentPeriods < 1 || recentPeriods > 60) {
+          throw new AppError(400, "INVALID_ADAPTER_CONFIG", "Eurostat recentPeriods 必须是 1–60 的整数。");
+        }
+      }
+    }
+  }
+  if (adapterType === "rss" && config.enrichment !== undefined) {
+    if (config.enrichment !== "eu_publication") {
+      throw new AppError(400, "INVALID_ADAPTER_CONFIG", "RSS enrichment 类型不受支持。");
+    }
+    for (const [key, fallback, maximum] of [["maxDetailPagesPerRun", 5, 10], ["maxAttachmentsPerItem", 4, 10]] as const) {
+      const number = Number(config[key] ?? fallback);
+      if (!Number.isInteger(number) || number < 1 || number > maximum) {
+        throw new AppError(400, "INVALID_ADAPTER_CONFIG", `${key} 必须是 1–${maximum} 的整数。`);
+      }
+    }
   }
   return config;
 }

@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { ResearchStore } from "../model";
 import { apiRequest } from "../data/api-client";
-import { recordsToV1, titleForV1, type BootstrapDto, type EvidenceDto, type RecordDto, type RecordKind, type RecordStatus, type RevisionDto, type SourceDto } from "../v2-model";
+import { recordsToV1, summaryForV1, titleForV1, type BootstrapDto, type EvidenceDto, type RecordDto, type RecordKind, type RecordStatus, type RevisionDto, type SourceDto } from "../v2-model";
 
 const EMPTY_STORE: ResearchStore = {
   version: 1,
@@ -16,13 +16,6 @@ export interface InitialUser {
   userId: string;
   email: string;
   displayName: string;
-}
-
-function summaryFor(kind: RecordKind, payload: Record<string, unknown>) {
-  if (kind === "hypothesis") return String(payload.statement ?? "");
-  if (kind === "indicator") return String(payload.note ?? "");
-  if (kind === "discussion") return String(payload.body ?? "");
-  return String(payload.summary ?? payload.nextAction ?? payload.trigger ?? "");
 }
 
 function withoutId(payload: Record<string, unknown>) {
@@ -85,7 +78,7 @@ export function useResearchData(initialUser: InitialUser) {
         kind,
         status: options?.status ?? (kind === "signal" ? "draft" : "published"),
         title: titleForV1(kind, value),
-        summary: summaryFor(kind, value),
+        summary: summaryForV1(kind, value),
         payload,
         changeReason: options?.changeReason,
       }),
@@ -103,7 +96,7 @@ export function useResearchData(initialUser: InitialUser) {
       body: JSON.stringify({
         id,
         expectedRevision: current.revision,
-        patch: { title: titleForV1(kind, { ...payload, ...patch }), summary: summaryFor(kind, payload), payload },
+        patch: { title: titleForV1(kind, { ...payload, ...patch }), summary: summaryForV1(kind, payload), payload },
         changeReason,
       }),
     });
@@ -150,6 +143,12 @@ export function useResearchData(initialUser: InitialUser) {
 
   async function importV1(raw: string) {
     const result = await apiRequest<{ batchId: string; counts: Record<string, number> }>("/api/import/v1", { method: "POST", body: raw });
+    await refresh();
+    return result;
+  }
+
+  async function importV2(raw: string) {
+    const result = await apiRequest<{ counts: Record<string, number> }>("/api/import/v2", { method: "POST", body: raw });
     await refresh();
     return result;
   }
@@ -226,6 +225,7 @@ export function useResearchData(initialUser: InitialUser) {
     restore,
     revisions,
     importV1,
+    importV2,
     exportV2,
     createSource,
     updateSource,

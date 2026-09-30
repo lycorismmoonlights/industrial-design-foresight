@@ -142,7 +142,7 @@ export const phaseMeta: Record<CrisisPhase, Omit<PhaseResult, "phase" | "pressur
   P4: {
     label: "复苏窗口期",
     posture: "快速进入",
-    action: "在 6–12 个月窗口集中投递、合作和原型验证，把储备转为市场位置。",
+    action: "在领先指标改善后的 1–3 个季度内集中投递、合作和原型验证，把储备转为市场位置。",
     accent: "blue",
   },
 };

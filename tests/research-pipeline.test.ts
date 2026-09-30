@@ -33,11 +33,14 @@ describe("official source adapters", () => {
     });
     const mockedFetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({
       status: "REQUEST_SUCCEEDED",
-      Results: { series: [{ seriesID: "CES0000000001", data: [{ year: "2026", period: "M07", periodName: "July", value: "102.4" }] }] },
+      Results: { series: [{ seriesID: "CES0000000001", data: [
+        { year: "2026", period: "M07", periodName: "July", value: "102.4" },
+        { year: "2026", period: "M06", periodName: "June", value: "101.9" },
+      ] }] },
     }), { status: 200, headers: { "content-type": "application/json" } }));
     vi.stubGlobal("fetch", mockedFetch);
 
-    await expect(fetchSource(ownerId, source.id)).resolves.toMatchObject({ status: "success", newCount: 1 });
+    await expect(fetchSource(ownerId, source.id)).resolves.toMatchObject({ status: "success", newCount: 2 });
     const row = await db.prepare("SELECT title, guid, ai_status FROM inbox_items WHERE owner_id = ?").bind(ownerId).first<Record<string, unknown>>();
     expect(row).toMatchObject({ title: "Employment：July = 102.4", guid: "bls:CES0000000001:2026:M07:102.4", ai_status: "pending" });
     const request = JSON.parse(String(mockedFetch.mock.calls[0][1]?.body));
@@ -66,9 +69,11 @@ describe("official source adapters", () => {
       }, value: [10, 12],
     })));
     const eurostat = await fetchApiAdapter({
-      adapterType: "eurostat", adapterConfig: { queries: [{ dataset: "demo_test", label: "EU test", filters: { geo: "EU27_2020" } }] }, maxItemsPerRun: 3,
+      adapterType: "eurostat", adapterConfig: { queries: [{ dataset: "demo_test", label: "EU test", recentPeriods: 8, filters: { freq: "Q", geo: "EU27_2020" } }] }, maxItemsPerRun: 3,
     }, {}, eurostatFetch as unknown as typeof fetch);
     expect(eurostat[0]).toMatchObject({ title: "EU test：2026 = 12", author: "Eurostat", publishedAt: "2026-01-01T00:00:00.000Z" });
+    const eurostatUrl = new URL(String(eurostatFetch.mock.calls[0][0]));
+    expect(eurostatUrl.searchParams.get("sinceTimePeriod")).toMatch(/^\d{4}-Q[1-4]$/);
   });
 
   it("rejects secrets embedded in persisted adapter configuration", async () => {
