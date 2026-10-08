@@ -1,7 +1,9 @@
 import { getD1 } from "../../db";
 import { isResearchStore, type ResearchStore } from "../model";
 import {
+  canonicalPayloadForRecord,
   RECORD_KINDS,
+  summaryForV1,
   titleForV1,
   v1Collections,
   type BootstrapDto,
@@ -133,10 +135,11 @@ export async function bootstrap(ownerId: string, user: BootstrapDto["user"]): Pr
     db.prepare("INSERT OR IGNORE INTO settings (owner_id, key, value_json, updated_at) VALUES (?, 'reviewDay', ?, ?)").bind(ownerId, JSON.stringify(0), initializedAt),
     db.prepare("INSERT OR IGNORE INTO settings (owner_id, key, value_json, updated_at) VALUES (?, 'reviewMinutes', ?, ?)").bind(ownerId, JSON.stringify(30), initializedAt),
   ]);
-  const [recordRows, sourceRows, inboxRows, evidenceRows, evidenceLinkRows, settingRows] = await Promise.all([
+  const [recordRows, sourceRows, inboxRows, inboxCountRow, evidenceRows, evidenceLinkRows, settingRows] = await Promise.all([
     allRows(db.prepare("SELECT * FROM records WHERE owner_id = ? ORDER BY updated_at DESC").bind(ownerId)),
     allRows(db.prepare("SELECT * FROM sources WHERE owner_id = ? ORDER BY name ASC").bind(ownerId)),
     allRows(db.prepare("SELECT * FROM inbox_items WHERE owner_id = ? ORDER BY created_at DESC LIMIT 200").bind(ownerId)),
+    db.prepare("SELECT SUM(CASE WHEN review_status = 'pending' THEN 1 ELSE 0 END) AS pending, SUM(CASE WHEN review_status != 'pending' THEN 1 ELSE 0 END) AS reviewed FROM inbox_items WHERE owner_id = ?").bind(ownerId).first<Row>(),
     allRows(db.prepare("SELECT * FROM evidence WHERE owner_id = ? ORDER BY created_at DESC").bind(ownerId)),
     allRows(db.prepare("SELECT link.evidence_id, link.record_id, link.relation FROM evidence_links AS link JOIN evidence AS evidence ON evidence.id = link.evidence_id WHERE evidence.owner_id = ?").bind(ownerId)),
     allRows(db.prepare("SELECT key, value_json FROM settings WHERE owner_id = ?").bind(ownerId)),
@@ -147,8 +150,8 @@ export async function bootstrap(ownerId: string, user: BootstrapDto["user"]): Pr
     records: recordRows.map(recordFromRow),
     sources: sourceRows.map(sourceFromRow),
     inboxStats: {
-      pending: inboxItems.filter((item) => item.reviewStatus === "pending").length,
-      reviewed: inboxItems.filter((item) => item.reviewStatus !== "pending").length,
+      pending: Number(inboxCountRow?.pending ?? 0),
+      reviewed: Number(inboxCountRow?.reviewed ?? 0),
     },
     inboxItems,
     evidence: evidenceRows.map((row) => ({
@@ -197,9 +200,11 @@ export async function createRecord(ownerId: string, actorEmail: string, input: {
     throw new AppError(400, "CHANGE_REASON_REQUIRED", "新建研究假设必须填写理由。");
   }
   const timestamp = now();
+  const title = input.title.trim();
+  const summary = input.summary === undefined ? summaryForV1(input.kind, input.payload ?? {}).trim() : input.summary.trim();
   const item: RecordDto = {
-    id: uuid(), kind: input.kind, status, title: input.title.trim(), summary: input.summary?.trim() ?? "",
-    payload: input.payload ?? {}, revision: 1, createdAt: timestamp, updatedAt: timestamp,
+    id: uuid(), kind: input.kind, status, title, summary,
+    payload: canonicalPayloadForRecord(input.kind, title, summary, input.payload ?? {}), revision: 1, createdAt: timestamp, updatedAt: timestamp,
     archivedAt: status === "archived" ? timestamp : null, deletedAt: null,
   };
   const db = getD1();
@@ -255,12 +260,18 @@ export async function updateRecord(ownerId: string, actorEmail: string, id: stri
   }
   const timestamp = now();
   const status = nextStatus;
+  const title = patch.title?.trim() ?? current.title;
+  const summary = patch.summary !== undefined
+    ? patch.summary.trim()
+    : patch.payload !== undefined
+      ? summaryForV1(current.kind, patch.payload).trim()
+      : current.summary;
   const next: RecordDto = {
     ...current,
     status,
-    title: patch.title?.trim() ?? current.title,
-    summary: patch.summary?.trim() ?? current.summary,
-    payload: patch.payload ?? current.payload,
+    title,
+    summary,
+    payload: canonicalPayloadForRecord(current.kind, title, summary, patch.payload ?? current.payload),
     revision: current.revision + 1,
     updatedAt: timestamp,
     archivedAt: status === "archived" ? current.archivedAt ?? timestamp : null,
@@ -356,6 +367,142 @@ export async function importV1(ownerId: string, actorEmail: string, rawBody: str
     .bind(batchId, ownerId, fileHash, JSON.stringify(counts), timestamp));
   await db.batch(statements);
   return { batchId, counts };
+}
+
+const V2_BACKUP_TABLES = [
+  "records",
+  "record_revisions",
+  "sources",
+  "inbox_items",
+  "evidence",
+  "settings",
+  "import_batches",
+  "sync_runs",
+  "evidence_links",
+] as const;
+
+type V2BackupTable = (typeof V2_BACKUP_TABLES)[number];
+type V2BackupData = Record<V2BackupTable, Row[]>;
+
+function v2BackupData(rawBody: string): V2BackupData {
+  let value: unknown;
+  try { value = JSON.parse(rawBody); } catch { throw new AppError(400, "INVALID_JSON", "导入文件不是有效 JSON。"); }
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new AppError(400, "INVALID_V2_BACKUP", "文件不是有效的 v2 完整备份。");
+  }
+  const backup = value as { version?: unknown; data?: unknown };
+  if (backup.version !== 2 || !backup.data || typeof backup.data !== "object" || Array.isArray(backup.data)) {
+    throw new AppError(400, "INVALID_V2_BACKUP", "文件不是有效的 v2 完整备份。");
+  }
+  const source = backup.data as Record<string, unknown>;
+  const data = {} as V2BackupData;
+  let totalRows = 0;
+  for (const table of V2_BACKUP_TABLES) {
+    const rows = source[table];
+    if (!Array.isArray(rows) || rows.some((row) => !row || typeof row !== "object" || Array.isArray(row))) {
+      throw new AppError(400, "INVALID_V2_BACKUP", `v2 备份缺少有效的 ${table} 数据。`);
+    }
+    data[table] = rows as Row[];
+    totalRows += rows.length;
+  }
+  if (totalRows > 20_000) throw new AppError(413, "IMPORT_TOO_LARGE", "v2 备份最多包含 20,000 行数据。");
+  return data;
+}
+
+function requiredBackupString(row: Row, field: string, table: string): string {
+  if (typeof row[field] !== "string" || !String(row[field]).trim()) {
+    throw new AppError(400, "INVALID_V2_BACKUP", `${table}.${field} 缺失或无效。`);
+  }
+  return String(row[field]);
+}
+
+function backupIdMap(rows: Row[], table: string): Map<string, string> {
+  const mapped = new Map<string, string>();
+  for (const row of rows) {
+    const id = requiredBackupString(row, "id", table);
+    if (mapped.has(id)) throw new AppError(400, "INVALID_V2_BACKUP", `${table} 包含重复 ID。`);
+    mapped.set(id, uuid());
+  }
+  return mapped;
+}
+
+function mappedBackupId(map: Map<string, string>, value: unknown, field: string): string {
+  const mapped = typeof value === "string" ? map.get(value) : undefined;
+  if (!mapped) throw new AppError(400, "INVALID_V2_BACKUP", `${field} 引用了备份中不存在的数据。`);
+  return mapped;
+}
+
+function nullableBackupValue(value: unknown): unknown {
+  return value === undefined ? null : value;
+}
+
+export async function importV2(ownerId: string, rawBody: string): Promise<{ counts: Record<V2BackupTable, number> }> {
+  const data = v2BackupData(rawBody);
+  const db = getD1();
+  const existing = await db.prepare("SELECT (SELECT COUNT(*) FROM records WHERE owner_id = ?) + (SELECT COUNT(*) FROM sources WHERE owner_id = ?) + (SELECT COUNT(*) FROM inbox_items WHERE owner_id = ?) + (SELECT COUNT(*) FROM evidence WHERE owner_id = ?) AS count")
+    .bind(ownerId, ownerId, ownerId, ownerId).first<{ count: number }>();
+  if (Number(existing?.count ?? 0) > 0) {
+    throw new AppError(409, "RESTORE_REQUIRES_EMPTY_DATABASE", "完整恢复仅允许写入空研究库，请先在独立空库中恢复。");
+  }
+
+  const recordIds = backupIdMap(data.records, "records");
+  const revisionIds = backupIdMap(data.record_revisions, "record_revisions");
+  const sourceIds = backupIdMap(data.sources, "sources");
+  const inboxIds = backupIdMap(data.inbox_items, "inbox_items");
+  const evidenceIds = backupIdMap(data.evidence, "evidence");
+  const importBatchIds = backupIdMap(data.import_batches, "import_batches");
+  const syncRunIds = backupIdMap(data.sync_runs, "sync_runs");
+  const statements: D1PreparedStatement[] = [
+    db.prepare("DELETE FROM settings WHERE owner_id = ?").bind(ownerId),
+    db.prepare("DELETE FROM import_batches WHERE owner_id = ?").bind(ownerId),
+  ];
+
+  for (const row of data.records) {
+    const kind = requiredBackupString(row, "kind", "records") as RecordKind;
+    const status = requiredBackupString(row, "status", "records") as RecordStatus;
+    if (!RECORD_KINDS.includes(kind) || !ALLOWED_STATUSES.has(status)) throw new AppError(400, "INVALID_V2_BACKUP", "records 包含未知类型或状态。");
+    statements.push(db.prepare("INSERT INTO records (id, owner_id, kind, status, title, summary, payload_json, revision, created_at, updated_at, archived_at, deleted_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+      .bind(mappedBackupId(recordIds, row.id, "records.id"), ownerId, kind, status, requiredBackupString(row, "title", "records"), String(row.summary ?? ""), String(row.payload_json ?? "{}"), Number(row.revision ?? 1), requiredBackupString(row, "created_at", "records"), requiredBackupString(row, "updated_at", "records"), nullableBackupValue(row.archived_at), nullableBackupValue(row.deleted_at)));
+  }
+  for (const row of data.record_revisions) {
+    const recordId = mappedBackupId(recordIds, row.record_id, "record_revisions.record_id");
+    let snapshot = parseJson<Record<string, unknown>>(row.snapshot_json, {});
+    snapshot = { ...snapshot, id: recordId };
+    statements.push(db.prepare("INSERT INTO record_revisions (id, record_id, owner_id, revision, snapshot_json, change_reason, changed_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
+      .bind(mappedBackupId(revisionIds, row.id, "record_revisions.id"), recordId, ownerId, Number(row.revision ?? 1), JSON.stringify(snapshot), nullableBackupValue(row.change_reason), String(row.changed_by ?? "backup"), requiredBackupString(row, "created_at", "record_revisions")));
+  }
+  for (const row of data.sources) {
+    statements.push(db.prepare("INSERT INTO sources (id, owner_id, name, page_url, feed_url, source_type, adapter_type, adapter_config_json, cadence, next_fetch_at, max_items_per_run, source_category, default_credibility, enabled, etag, last_modified, last_fetch_at, last_success_at, last_error, last_duration_ms, last_new_count, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+      .bind(mappedBackupId(sourceIds, row.id, "sources.id"), ownerId, requiredBackupString(row, "name", "sources"), nullableBackupValue(row.page_url), nullableBackupValue(row.feed_url), String(row.source_type ?? "rss"), String(row.adapter_type ?? "rss"), String(row.adapter_config_json ?? "{}"), String(row.cadence ?? "daily"), nullableBackupValue(row.next_fetch_at), Number(row.max_items_per_run ?? 30), String(row.source_category ?? "industry_media"), Number(row.default_credibility ?? 3), Number(row.enabled ?? 0), nullableBackupValue(row.etag), nullableBackupValue(row.last_modified), nullableBackupValue(row.last_fetch_at), nullableBackupValue(row.last_success_at), nullableBackupValue(row.last_error), nullableBackupValue(row.last_duration_ms), Number(row.last_new_count ?? 0), requiredBackupString(row, "created_at", "sources"), requiredBackupString(row, "updated_at", "sources")));
+  }
+  for (const row of data.inbox_items) {
+    const recordId = row.record_id == null ? null : mappedBackupId(recordIds, row.record_id, "inbox_items.record_id");
+    const hypothesisLinks = parseJson<unknown[]>(row.ai_hypothesis_links_json, []).map((recordIdValue) => mappedBackupId(recordIds, recordIdValue, "inbox_items.ai_hypothesis_links_json"));
+    statements.push(db.prepare("INSERT INTO inbox_items (id, owner_id, source_id, guid, canonical_url, content_hash, dedupe_key, title, summary, author, published_at, review_status, reviewed_at, record_id, ai_status, ai_summary, ai_quadrant, ai_relevance, ai_stance_suggestion, ai_tags_json, ai_hypothesis_links_json, ai_model, ai_prompt_version, ai_attempt_count, ai_started_at, ai_processed_at, ai_error, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+      .bind(mappedBackupId(inboxIds, row.id, "inbox_items.id"), ownerId, mappedBackupId(sourceIds, row.source_id, "inbox_items.source_id"), nullableBackupValue(row.guid), nullableBackupValue(row.canonical_url), requiredBackupString(row, "content_hash", "inbox_items"), requiredBackupString(row, "dedupe_key", "inbox_items"), requiredBackupString(row, "title", "inbox_items"), String(row.summary ?? ""), nullableBackupValue(row.author), nullableBackupValue(row.published_at), String(row.review_status ?? "pending"), nullableBackupValue(row.reviewed_at), recordId, String(row.ai_status ?? "pending"), nullableBackupValue(row.ai_summary), nullableBackupValue(row.ai_quadrant), nullableBackupValue(row.ai_relevance), nullableBackupValue(row.ai_stance_suggestion), String(row.ai_tags_json ?? "[]"), JSON.stringify(hypothesisLinks), nullableBackupValue(row.ai_model), nullableBackupValue(row.ai_prompt_version), Number(row.ai_attempt_count ?? 0), nullableBackupValue(row.ai_started_at), nullableBackupValue(row.ai_processed_at), nullableBackupValue(row.ai_error), requiredBackupString(row, "created_at", "inbox_items")));
+  }
+  for (const row of data.evidence) {
+    statements.push(db.prepare("INSERT INTO evidence (id, owner_id, title, url, source_name, source_category, credibility, relevance, stance, note, published_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+      .bind(mappedBackupId(evidenceIds, row.id, "evidence.id"), ownerId, requiredBackupString(row, "title", "evidence"), nullableBackupValue(row.url), requiredBackupString(row, "source_name", "evidence"), requiredBackupString(row, "source_category", "evidence"), Number(row.credibility), Number(row.relevance), requiredBackupString(row, "stance", "evidence"), String(row.note ?? ""), nullableBackupValue(row.published_at), requiredBackupString(row, "created_at", "evidence"), requiredBackupString(row, "updated_at", "evidence")));
+  }
+  for (const row of data.evidence_links) {
+    statements.push(db.prepare("INSERT INTO evidence_links (evidence_id, record_id, relation, created_at) VALUES (?, ?, ?, ?)")
+      .bind(mappedBackupId(evidenceIds, row.evidence_id, "evidence_links.evidence_id"), mappedBackupId(recordIds, row.record_id, "evidence_links.record_id"), requiredBackupString(row, "relation", "evidence_links"), requiredBackupString(row, "created_at", "evidence_links")));
+  }
+  for (const row of data.settings) {
+    statements.push(db.prepare("INSERT INTO settings (owner_id, key, value_json, updated_at) VALUES (?, ?, ?, ?)")
+      .bind(ownerId, requiredBackupString(row, "key", "settings"), requiredBackupString(row, "value_json", "settings"), requiredBackupString(row, "updated_at", "settings")));
+  }
+  for (const row of data.import_batches) {
+    statements.push(db.prepare("INSERT INTO import_batches (id, owner_id, file_hash, counts_json, created_at) VALUES (?, ?, ?, ?, ?)")
+      .bind(mappedBackupId(importBatchIds, row.id, "import_batches.id"), ownerId, requiredBackupString(row, "file_hash", "import_batches"), String(row.counts_json ?? "{}"), requiredBackupString(row, "created_at", "import_batches")));
+  }
+  for (const row of data.sync_runs) {
+    statements.push(db.prepare("INSERT INTO sync_runs (id, owner_id, source_id, status, duration_ms, new_count, error, started_at, finished_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
+      .bind(mappedBackupId(syncRunIds, row.id, "sync_runs.id"), ownerId, mappedBackupId(sourceIds, row.source_id, "sync_runs.source_id"), requiredBackupString(row, "status", "sync_runs"), Number(row.duration_ms ?? 0), Number(row.new_count ?? 0), nullableBackupValue(row.error), requiredBackupString(row, "started_at", "sync_runs"), requiredBackupString(row, "finished_at", "sync_runs")));
+  }
+  await db.batch(statements);
+  return { counts: Object.fromEntries(V2_BACKUP_TABLES.map((table) => [table, data[table].length])) as Record<V2BackupTable, number> };
 }
 
 export async function exportAll(ownerId: string) {
