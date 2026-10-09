@@ -24,8 +24,8 @@ import {
   Plus,
   Radar,
   RefreshCcw,
-  Rss,
   Search,
+  Settings2,
   ShieldCheck,
   Sparkles,
   Target,
@@ -33,13 +33,14 @@ import {
   X,
   type LucideIcon,
 } from "lucide-react";
-import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { FormEvent, type KeyboardEvent, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { demoStore, scenarioPresets } from "../demo-data";
 import { useResearchData, type InitialUser } from "../hooks/useResearchData";
 import { useDialogA11y } from "../hooks/useDialogA11y";
 import { EvidenceView, InboxView, SourcesView, WeeklyView } from "./ResearchOperations";
 import { AutomationOperations } from "./AutomationOperations";
+import { isViewId, WORKSPACES, workspaceForView, type WorkspaceId } from "../navigation";
 import {
   calculatePhase,
   phaseMeta,
@@ -59,20 +60,24 @@ import type { RecordDto, RevisionDto } from "../v2-model";
 
 type ModalType = "signal" | "indicator" | "hypothesis" | "skill" | "opportunity" | "discussion" | null;
 
-const NAV: Array<{ id: ViewId; label: string; icon: LucideIcon; group?: string }> = [
-  { id: "dashboard", label: "研究总览", icon: LayoutDashboard, group: "工作台" },
-  { id: "radar", label: "经济与产业雷达", icon: Radar },
-  { id: "forecast", label: "经济周期推演", icon: BrainCircuit },
-  { id: "skills", label: "技能库", icon: GraduationCap, group: "准备与进入" },
-  { id: "opportunities", label: "机会库", icon: BriefcaseBusiness },
-  { id: "discussions", label: "讨论与决策", icon: MessageSquareText, group: "协作与维护" },
-  { id: "weekly", label: "每周研究", icon: RefreshCcw, group: "资料与证据" },
-  { id: "operations", label: "自动化运营", icon: Gauge },
-  { id: "sources", label: "来源管理", icon: Rss },
-  { id: "inbox", label: "待审核箱", icon: Inbox },
-  { id: "evidence", label: "证据库", icon: ShieldCheck },
-  { id: "data", label: "数据与备份", icon: Database },
-];
+const WORKSPACE_ICONS: Record<WorkspaceId, LucideIcon> = {
+  overview: LayoutDashboard, research: Radar, library: Inbox,
+  action: BriefcaseBusiness, settings: Settings2,
+};
+
+const CREATE_ACTIONS: Partial<Record<ViewId, { type: Exclude<ModalType, null>; label: string }>> = {
+  dashboard: { type: "signal", label: "新增信号" },
+  radar: { type: "signal", label: "新增信号" },
+  forecast: { type: "indicator", label: "新增指标" },
+  skills: { type: "skill", label: "新增技能" },
+  opportunities: { type: "opportunity", label: "新增机会" },
+  discussions: { type: "discussion", label: "新增讨论" },
+};
+
+const RECORD_VIEWS: Record<Exclude<ModalType, null>, ViewId> = {
+  signal: "radar", indicator: "forecast", hypothesis: "forecast",
+  skill: "skills", opportunity: "opportunities", discussion: "discussions",
+};
 
 const VIEW_COPY: Record<ViewId, { eyebrow: string; title: string; description: string }> = {
   dashboard: { eyebrow: "研究工作台", title: "经济与产业前瞻总览", description: "把宏观经济、制造业、企业经营与工业设计机会放在同一条证据链上。" },
@@ -82,7 +87,7 @@ const VIEW_COPY: Record<ViewId, { eyebrow: string; title: string; description: s
   opportunities: { eyebrow: "进入准备", title: "机会窗口库", description: "分别管理现在、危机期和复苏窗口的进入条件，避免把趋势等同于机会。" },
   discussions: { eyebrow: "研究协作", title: "讨论与决策", description: "区分开放讨论、反方证据和正式决定，让研究过程可追溯。" },
   weekly: { eyebrow: "研究节奏", title: "每周研究面板", description: "用固定节奏维护来源、证据、能力动作和机会触发器，避免只收藏、不判断。" },
-  operations: { eyebrow: "自动化应用层", title: "API 与抓取数据运营台", description: "统一管理接口就绪状态、来源参数、管线运行和抓取数据，不向浏览器暴露密钥。" },
+  operations: { eyebrow: "运行维护", title: "采集与 AI 运行监控", description: "检查接口、运行记录与失败条目；来源配置统一在资料中心管理。" },
   sources: { eyebrow: "资料发现", title: "来源管理", description: "查看每个来源的状态、修复连接问题，并控制每天自动收集的信息渠道。" },
   inbox: { eyebrow: "人工审核", title: "待审核箱", description: "拒绝、忽略或转为信号草稿；未发布草稿不会出现在行业雷达。" },
   evidence: { eyebrow: "证据链", title: "证据库", description: "记录来源类别、可信度、相关度和立场；分值只作提示，不替你判断。" },
@@ -129,15 +134,24 @@ export function ForesightApp({ initialUser }: { initialUser: InitialUser }) {
   const restoreRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
-    const savedView = window.localStorage.getItem("id-foresight-ui-view") as ViewId | null;
+    let savedView: string | null = null;
+    try {
+      savedView = window.localStorage.getItem("id-foresight-ui-view");
+    } catch {
+      // A blocked preference store must not prevent opening the research UI.
+    }
     const timer = window.setTimeout(() => {
-      if (savedView && NAV.some((item) => item.id === savedView)) setActiveView(savedView);
+      if (isViewId(savedView)) setActiveView(savedView);
     }, 0);
     return () => window.clearTimeout(timer);
   }, []);
 
   useEffect(() => {
-    window.localStorage.setItem("id-foresight-ui-view", activeView);
+    try {
+      window.localStorage.setItem("id-foresight-ui-view", activeView);
+    } catch {
+      // Navigation still works when browser preferences cannot be persisted.
+    }
   }, [activeView]);
 
   useEffect(() => {
@@ -181,6 +195,19 @@ export function ForesightApp({ initialUser }: { initialUser: InitialUser }) {
   function navigate(view: ViewId) {
     setActiveView(view);
     setMenuOpen(false);
+  }
+
+  function navigateTab(event: KeyboardEvent<HTMLButtonElement>, index: number) {
+    const views = workspaceForView(activeView).views;
+    let next: number;
+    if (event.key === "ArrowRight") next = (index + 1) % views.length;
+    else if (event.key === "ArrowLeft") next = (index + views.length - 1) % views.length;
+    else if (event.key === "Home") next = 0;
+    else if (event.key === "End") next = views.length - 1;
+    else return;
+    event.preventDefault();
+    navigate(views[next].id);
+    document.getElementById(`view-tab-${views[next].id}`)?.focus();
   }
 
   function updateIndicator(id: string, patch: Partial<Indicator>) {
@@ -257,6 +284,7 @@ export function ForesightApp({ initialUser }: { initialUser: InitialUser }) {
 
   async function createRecord(kind: Exclude<ModalType, null>, value: Record<string, unknown>, changeReason?: string) {
     await research.createLegacy(kind, value, changeReason ? { changeReason } : undefined);
+    navigate(RECORD_VIEWS[kind]);
     setNotice("记录已保存到云端");
   }
 
@@ -265,6 +293,9 @@ export function ForesightApp({ initialUser }: { initialUser: InitialUser }) {
   }
 
   const page = VIEW_COPY[activeView];
+  const workspace = workspaceForView(activeView);
+  const activeTab = workspace.views.find((view) => view.id === activeView)!;
+  const createAction = CREATE_ACTIONS[activeView];
 
   return (
     <div className="app-shell">
@@ -274,23 +305,21 @@ export function ForesightApp({ initialUser }: { initialUser: InitialUser }) {
           <div><strong>工业设计前瞻站</strong><span>FORESIGHT · LAB 01</span></div>
         </div>
         <nav className="side-nav" aria-label="主导航">
-          {NAV.map((item, index) => {
-            const Icon = item.icon;
-            const showGroup = item.group && (index === 0 || NAV[index - 1].group !== item.group);
+          <p className="nav-group">研究工作台</p>
+          {WORKSPACES.map((item) => {
+            const Icon = WORKSPACE_ICONS[item.id];
             return (
               <div key={item.id}>
-                {showGroup && <p className="nav-group">{item.group}</p>}
-                <button className={activeView === item.id ? "active" : ""} onClick={() => navigate(item.id)}>
+                <button className={workspace.id === item.id ? "active" : ""} aria-label={item.label} aria-current={workspace.id === item.id ? "page" : undefined} title={item.description} onClick={() => navigate(workspace.id === item.id ? activeView : item.views[0].id)}>
                   <Icon size={17} strokeWidth={1.8} /><span>{item.label}</span>
-                  {item.id === "discussions" && <em>{store.discussions.filter((x) => x.status === "开放").length}</em>}
-                  {item.id === "inbox" && research.data.inboxStats.pending > 0 && <em>{research.data.inboxStats.pending}</em>}
+                  {item.id === "library" && research.data.inboxStats.pending > 0 && <em aria-label={`${research.data.inboxStats.pending} 条待审核`}>{research.data.inboxStats.pending}</em>}
                 </button>
               </div>
             );
           })}
         </nav>
         <div className="sidebar-bottom">
-          <Link className="button secondary" href="/showcase" style={{ width: "100%", marginBottom: 10, textDecoration: "none" }}><ArrowUpRight size={14} />项目介绍 · 跨学院共研</Link>
+          <Link className="sidebar-about" href="/showcase"><ArrowUpRight size={14} />项目介绍与共研</Link>
           <div className="local-status"><ShieldCheck size={16} /><div><strong>私有云端模式</strong><span>{research.data.user.email}</span></div></div>
           <div className="version-line"><span>PERSONAL v0.5</span><a href="/signout-with-chatgpt?return_to=/">退出</a></div>
         </div>
@@ -301,18 +330,24 @@ export function ForesightApp({ initialUser }: { initialUser: InitialUser }) {
       <main className="main-area">
         <header className="topbar">
           <button className="mobile-menu" aria-label="打开菜单" onClick={() => setMenuOpen(true)}><Menu size={20} /></button>
-          <label className="global-search"><Search size={17} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索信号、来源或标签…" /><kbd>⌘ K</kbd></label>
+          <form className="global-search" onSubmit={(event) => { event.preventDefault(); navigate("radar"); }}><Search size={17} /><input aria-label="搜索雷达信号" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索信号，按 Enter 查看…" /><button type="submit" aria-label="查看搜索结果"><ArrowRight size={15} /></button></form>
           <div className="top-actions">
             <div className={`phase-pill ${phase.accent}`}><span>{phase.phase}</span>{phase.label}</div>
-            <button className="button primary compact" aria-label="新增记录" onClick={() => setModalType("signal")}><Plus size={16} /><span>新增记录</span></button>
+            {createAction && <button className="button primary compact" aria-label="新增记录" onClick={() => setModalType(createAction.type)}><Plus size={16} /><span>{createAction.label}</span></button>}
           </div>
         </header>
 
         <div className="page-wrap">
           <div className="page-heading">
-            <div><p className="eyebrow">{page.eyebrow}</p><h1>{page.title}</h1><p>{page.description}</p></div>
+            <div><p className="eyebrow">{workspace.label} / {activeTab.label}</p><h1>{page.title}</h1><p>{page.description}</p></div>
             <div className="heading-meta"><span><Clock3 size={14} />{research.records.length ? `更新 ${formatDate(store.updatedAt)}` : "尚无研究记录"}</span><span className="demo-badge">人工审核 · 云端可追溯</span></div>
           </div>
+
+          <div className="workspace-tabs" role="tablist" aria-label={`${workspace.label}页面`}>
+            {workspace.views.map((view, index) => <button key={view.id} id={`view-tab-${view.id}`} role="tab" aria-selected={activeView === view.id} aria-controls={`view-panel-${view.id}`} tabIndex={activeView === view.id ? 0 : -1} onClick={() => navigate(view.id)} onKeyDown={(event) => navigateTab(event, index)}>{view.label}{view.id === "inbox" && research.data.inboxStats.pending > 0 && <span>{research.data.inboxStats.pending}</span>}</button>)}
+          </div>
+
+          <div className="workspace-panel" id={`view-panel-${activeView}`} role="tabpanel" aria-labelledby={`view-tab-${activeView}`} tabIndex={0}>
 
           {research.error && <div className="inline-error">{research.error}<button onClick={() => void research.refresh()}>重试</button></div>}
           {!research.records.length && ["dashboard", "radar", "forecast", "skills", "opportunities", "discussions"].includes(activeView) && <section className="empty-cloud"><Database size={24} /><div><h2>研究库目前为空</h2><p>导入经济基线示例后，即可使用雷达、周期推演、技能和机会功能。</p></div><button className="button secondary" onClick={() => navigate("data")}>前往导入</button></section>}
@@ -328,13 +363,14 @@ export function ForesightApp({ initialUser }: { initialUser: InitialUser }) {
           {activeView === "opportunities" && <OpportunityView opportunities={store.opportunities} updateStatus={updateOpportunity} openAdd={() => setModalType("opportunity")} />}
           {activeView === "discussions" && <DiscussionView discussions={store.discussions} convertDecision={convertDecision} openAdd={() => setModalType("discussion")} />}
           {activeView === "weekly" && <WeeklyView research={research} navigate={navigate} notify={(action, success) => void run(action, success)} />}
-          {activeView === "operations" && <AutomationOperations research={research} notify={(action, success) => void run(action, success)} />}
+          {activeView === "operations" && <AutomationOperations research={research} notify={(action, success) => void run(action, success)} openSources={() => navigate("sources")} openInbox={() => navigate("inbox")} />}
           {activeView === "sources" && <SourcesView research={research} notify={(action, success) => void run(action, success)} />}
           {activeView === "inbox" && <InboxView research={research} notify={(action, success) => void run(action, success)} />}
           {activeView === "evidence" && <EvidenceView research={research} notify={(action, success) => void run(action, success)} />}
           {activeView === "data" && (
             <DataView store={store} records={research.records} exportData={() => void exportData()} importData={() => importRef.current?.click()} restoreData={() => restoreRef.current?.click()} canRestore={!research.records.length && !research.data.sources.length && !research.data.evidence.length && research.data.inboxStats.pending + research.data.inboxStats.reviewed === 0} importExample={() => void importExample()} archive={(record) => void run(() => research.setStatus(record, "archived"), "记录已归档")} restore={(record) => void run(() => record.deletedAt ? research.restore(record) : research.setStatus(record, "published"), "记录已恢复")} remove={(record) => void run(() => research.softDelete(record), "记录已移入回收站")} revisions={research.revisions} update={(record, patch, reason) => research.updateRecord(record, patch, reason)} />
           )}
+          </div>
         </div>
       </main>
 

@@ -9,7 +9,8 @@ test("owner research flow persists in D1 and remains usable on mobile", async ({
   await expect(page.getByRole("heading", { name: "经济与产业前瞻总览" })).toBeVisible();
   await expect(page.locator("[data-nextjs-dialog], .vite-error-overlay")).toHaveCount(0);
 
-  await page.getByRole("button", { name: "来源管理", exact: true }).click();
+  await page.getByRole("button", { name: "资料中心", exact: true }).click();
+  await page.getByRole("tab", { name: "来源管理", exact: true }).click();
   await expect(page.getByRole("heading", { name: "来源管理", exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "添加来源", exact: true })).toBeVisible();
   await expect(page.getByText(/个来源/, { exact: false }).first()).toBeVisible();
@@ -29,11 +30,15 @@ test("owner research flow persists in D1 and remains usable on mobile", async ({
   await page.reload();
   await expect(page.getByText(sourceName, { exact: true }).first()).toBeVisible();
 
-  await page.getByRole("button", { name: "自动化运营", exact: true }).click();
-  await expect(page.getByRole("heading", { name: "API 与抓取数据运营台", exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "设置与备份", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "采集与 AI 运行监控", exact: true })).toBeVisible();
   await expect(page.getByRole("heading", { name: "接口就绪状态", exact: true })).toBeVisible();
-  await expect(page.locator("strong", { hasText: sourceName })).toBeVisible();
-  await page.getByRole("button", { name: "配置", exact: true }).last().click();
+  await expect(page.getByRole("heading", { name: "来源与 API 参数", exact: true })).toHaveCount(0);
+  await page.getByRole("button", { name: "前往来源管理", exact: true }).click();
+  await expect(page.getByRole("tab", { name: "来源管理", exact: true })).toHaveAttribute("aria-selected", "true");
+  await page.getByRole("button", { name: new RegExp(sourceName) }).click();
+  await expect(page.getByRole("heading", { name: sourceName, exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "编辑设置", exact: true }).click();
   await expect(page.getByRole("button", { name: "保存配置", exact: true })).toBeVisible();
   await page.getByRole("button", { name: "取消", exact: true }).click();
 
@@ -81,11 +86,13 @@ test("scenario previews stay read-only and record dialogs keep keyboard focus", 
   });
   const page = await context.newPage();
   await page.goto("/");
-  await page.getByRole("button", { name: "数据与备份", exact: true }).click();
+  await page.getByRole("button", { name: "设置与备份", exact: true }).click();
+  await page.getByRole("tab", { name: "数据与备份", exact: true }).click();
   await page.getByRole("button", { name: /导入示例研究/ }).click();
   await expect(page.getByRole("status")).toContainText("示例研究数据已导入");
 
-  await page.getByRole("button", { name: "经济周期推演", exact: true }).click();
+  await page.getByRole("button", { name: "经济研究", exact: true }).click();
+  await page.getByRole("tab", { name: "指标与假设", exact: true }).click();
   const before = await (await context.request.get("/api/bootstrap")).json() as { data: { records: Array<{ kind: string; payload: unknown }> } };
   await page.getByRole("button", { name: /衰退冲击/ }).click();
   await expect(page.getByRole("status")).toContainText("不会写入真实指标");
@@ -94,6 +101,7 @@ test("scenario previews stay read-only and record dialogs keep keyboard focus", 
   expect(after.data.records.filter((record) => record.kind === "indicator").map((record) => record.payload))
     .toEqual(before.data.records.filter((record) => record.kind === "indicator").map((record) => record.payload));
 
+  await page.getByRole("tab", { name: "信号雷达", exact: true }).click();
   const addButton = page.getByRole("button", { name: "新增记录", exact: true });
   await addButton.click();
   const dialog = page.getByRole("dialog", { name: "新增行业信号" });
