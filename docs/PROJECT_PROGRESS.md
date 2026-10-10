@@ -2,42 +2,48 @@
 
 这是开发工作区的版本备份，包含尚未提交的代码；不表示已发布、部署或验收。
 
-- 同步时间（UTC）：2026-10-09T03:37:56.484Z
-- 来源分支：`feat/source-management-redesign`
-- 来源 HEAD：`64bfc1a5b1710d9b5581efb598152873838e8657`
-- 代码内容树：`9511d5fea8bead1dd769c96989a39f2fb7381d7c`
-- 同步文件：100 个
+- 同步时间（UTC）：2026-10-10T01:07:56.326Z
+- 来源分支：`main`
+- 来源 HEAD：`b62faf98dfcb9481779fe7ed5311f09d820f8c4d`
+- 代码内容树：`1a2df2e7123fea5466de8eb5a5bfaf5dbb7f9773`
+- 同步文件：109 个
 - 同步范围：代码、配置、测试、公开资源与进度文档。
 
 ## 本次变更（相对上一快照；首次相对 main）
 
 ```text
 M	.gitignore
-D	app/api/import/v2/route.ts
+M	README.md
+A	app/api/import/v2/route.ts
+M	app/components/AutomationOperations.tsx
 M	app/components/ForesightApp.tsx
 M	app/components/ResearchOperations.tsx
 M	app/demo-data.ts
 M	app/globals.css
-D	app/hooks/useDialogA11y.ts
+A	app/hooks/useDialogA11y.ts
 M	app/hooks/useResearchData.ts
 M	app/model.ts
+A	app/navigation.ts
 M	app/server/deepseek.ts
 M	app/server/ingestion.ts
 M	app/server/repository.ts
 M	app/server/source-adapters.ts
-D	app/server/source-enrichment.ts
+A	app/server/source-enrichment.ts
 M	app/showcase/ProjectShowcase.tsx
 M	app/v2-model.ts
-D	drizzle/0003_seed_economic_sources.sql
-D	drizzle/meta/0003_snapshot.json
+M	docs/OPERATIONS.md
+A	drizzle/0003_seed_economic_sources.sql
+A	drizzle/meta/0003_snapshot.json
 M	drizzle/meta/_journal.json
 M	eslint.config.mjs
 M	playwright.config.ts
+A	tests/browser/navigation.spec.ts
 M	tests/browser/smoke.spec.ts
 M	tests/ingestion.test.ts
+A	tests/navigation.test.ts
 M	tests/records.test.ts
 M	tests/research-pipeline.test.ts
-D	tests/source-enrichment.test.ts
+A	tests/source-enrichment.test.ts
 M	tsconfig.json
 M	vitest.config.ts
 ```

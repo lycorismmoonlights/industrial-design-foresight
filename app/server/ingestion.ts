@@ -1,9 +1,8 @@
 import { getAppEnv, getD1 } from "../../db";
-import type { EvidenceDto, SourceDto } from "../v2-model";
+import { canonicalPayloadForRecord, type EvidenceDto, type RecordDto, type SourceDto } from "../v2-model";
 import { AppError } from "./errors";
 import { discoverFeedUrl, parseFeed } from "./feed";
 import { assertPublicHttpUrl, safeFetchText } from "./network-safety";
-import { createRecord } from "./repository";
 import {
   ADAPTER_TYPES,
   SOURCE_CADENCES,
@@ -11,6 +10,7 @@ import {
   validateAdapterConfig,
   type NormalizedSourceItem,
 } from "./source-adapters";
+import { expandEuPublicationEntries, type EuPublicationEnrichmentConfig } from "./source-enrichment";
 
 type Row = Record<string, unknown>;
 const SOURCE_TYPES = new Set(["rss", "atom", "api", "manual"]);
@@ -151,12 +151,20 @@ export async function createSource(ownerId: string, input: {
   }
   const timestamp = now();
   const id = uuid();
+  if (feedUrl) {
+    const duplicate = await getD1().prepare("SELECT 1 AS duplicate FROM sources WHERE owner_id = ? AND feed_url = ? LIMIT 1").bind(ownerId, feedUrl).first<Row>();
+    if (duplicate) throw new AppError(409, "SOURCE_ALREADY_EXISTS", "这个订阅地址已经存在。");
+  }
   try {
     await getD1().prepare("INSERT INTO sources (id, owner_id, name, page_url, feed_url, source_type, adapter_type, adapter_config_json, cadence, max_items_per_run, source_category, default_credibility, enabled, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
       .bind(id, ownerId, name, pageUrl, feedUrl, sourceType, adapterType, JSON.stringify(adapterConfig), cadence, maxItemsPerRun, input.sourceCategory?.trim() || "industry_media", oneToFive(input.defaultCredibility ?? 3, "默认可信度"), input.enabled ? 1 : 0, timestamp, timestamp).run();
   } catch (error) {
     if (error instanceof AppError) throw error;
-    throw new AppError(409, "SOURCE_ALREADY_EXISTS", "这个订阅地址已经存在。");
+    const message = error instanceof Error ? error.message : "";
+    if (/unique constraint|idx_sources_owner_feed_url/i.test(message)) {
+      throw new AppError(409, "SOURCE_ALREADY_EXISTS", "这个订阅地址已经存在。");
+    }
+    throw new AppError(500, "SOURCE_CREATE_FAILED", "来源暂时无法保存，请检查数据库迁移状态后重试。");
   }
   return sourceFromRow((await ownedSource(ownerId, id)));
 }
@@ -193,7 +201,7 @@ export async function updateSource(ownerId: string, id: string, patch: {
   if (adapterType === "rss" && !feedUrl) throw new AppError(400, "SOURCE_URL_REQUIRED", "RSS 来源必须保留订阅地址。");
   const sourceType = isApiAdapter ? "api" : feedUrl ? String(current.source_type === "atom" ? "atom" : "rss") : "manual";
   const timestamp = now();
-  await getD1().prepare("UPDATE sources SET name = ?, page_url = ?, feed_url = ?, source_type = ?, adapter_type = ?, adapter_config_json = ?, cadence = ?, max_items_per_run = ?, next_fetch_at = NULL, source_category = ?, default_credibility = ?, enabled = ?, updated_at = ? WHERE id = ? AND owner_id = ?")
+  await getD1().prepare("UPDATE sources SET name = ?, page_url = ?, feed_url = ?, source_type = ?, adapter_type = ?, adapter_config_json = ?, cadence = ?, max_items_per_run = ?, next_fetch_at = NULL, etag = NULL, last_modified = NULL, source_category = ?, default_credibility = ?, enabled = ?, updated_at = ? WHERE id = ? AND owner_id = ?")
     .bind(name, pageUrl, feedUrl, sourceType, adapterType, JSON.stringify(adapterConfig), cadence, oneToHundred(patch.maxItemsPerRun ?? current.max_items_per_run ?? 30, "单次条目上限"), patch.sourceCategory?.trim() || String(current.source_category), oneToFive(patch.defaultCredibility ?? current.default_credibility, "默认可信度"), patch.enabled === undefined ? Number(current.enabled) : patch.enabled ? 1 : 0, timestamp, id, ownerId).run();
   return sourceFromRow((await ownedSource(ownerId, id)));
 }
@@ -215,7 +223,7 @@ export function nextFetchAtForCadence(cadence: SourceDto["cadence"], timestamp: 
   return new Date(nextLocalMidnight.getTime() - beijingOffsetMs).toISOString();
 }
 
-async function insertNormalizedItems(ownerId: string, sourceId: string, entries: NormalizedSourceItem[], maximum: number): Promise<number> {
+async function insertNormalizedItems(ownerId: string, sourceId: string, entries: NormalizedSourceItem[], maximum: number, preferGuid = false): Promise<number> {
   const db = getD1();
   const existingResult = await db.prepare("SELECT guid, canonical_url, content_hash FROM inbox_items WHERE owner_id = ? AND source_id = ?").bind(ownerId, sourceId).all<Row>();
   const existing = existingResult.results ?? [];
@@ -225,12 +233,15 @@ async function insertNormalizedItems(ownerId: string, sourceId: string, entries:
   const timestamp = now();
   const inserts: D1PreparedStatement[] = [];
   for (const entry of entries.slice(0, maximum)) {
-    if ((entry.guid && guids.has(entry.guid)) || (entry.canonicalUrl && urls.has(entry.canonicalUrl)) || hashes.has(entry.contentHash)) continue;
+    const duplicateIdentity = preferGuid && entry.guid
+      ? guids.has(entry.guid)
+      : (entry.guid && guids.has(entry.guid)) || (entry.canonicalUrl && urls.has(entry.canonicalUrl));
+    if (duplicateIdentity || hashes.has(entry.contentHash)) continue;
     const dedupeKey = entry.guid ? `guid:${entry.guid}` : entry.canonicalUrl ? `url:${entry.canonicalUrl}` : `hash:${entry.contentHash}`;
     inserts.push(db.prepare("INSERT INTO inbox_items (id, owner_id, source_id, guid, canonical_url, content_hash, dedupe_key, title, summary, author, published_at, review_status, ai_status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 'pending', ?)")
       .bind(uuid(), ownerId, sourceId, entry.guid, entry.canonicalUrl, entry.contentHash, dedupeKey, entry.title, entry.summary, entry.author, entry.publishedAt, timestamp));
     if (entry.guid) guids.add(entry.guid);
-    if (entry.canonicalUrl) urls.add(entry.canonicalUrl);
+    if (entry.canonicalUrl && !(preferGuid && entry.guid)) urls.add(entry.canonicalUrl);
     hashes.add(entry.contentHash);
   }
   if (inserts.length) await db.batch(inserts);
@@ -264,7 +275,7 @@ export async function fetchSource(ownerId: string, sourceId: string): Promise<Fe
         adapterConfig: parseObject(source.adapter_config_json),
         maxItemsPerRun: maximum,
       }, getAppEnv());
-      const newCount = await insertNormalizedItems(ownerId, sourceId, entries, maximum);
+      const newCount = await insertNormalizedItems(ownerId, sourceId, entries, maximum, true);
       const durationMs = Date.now() - started;
       await recordSync(ownerId, sourceId, cadence, startedAt, "success", durationMs, newCount, null);
       return { sourceId, status: "success", newCount, durationMs };
@@ -276,14 +287,27 @@ export async function fetchSource(ownerId: string, sourceId: string): Promise<Fe
     if (source.etag) headers.set("if-none-match", String(source.etag));
     if (source.last_modified) headers.set("if-modified-since", String(source.last_modified));
     const fetched = await safeFetchText(String(source.feed_url), { headers });
-    const durationMs = Date.now() - started;
     if (fetched.response.status === 304) {
+      const durationMs = Date.now() - started;
       await recordSync(ownerId, sourceId, cadence, startedAt, "not_modified", durationMs, 0, null);
       return { sourceId, status: "not_modified", newCount: 0, durationMs };
     }
     if (!fetched.response.ok) throw new AppError(502, "SOURCE_HTTP_ERROR", `来源返回 HTTP ${fetched.response.status}。`);
     const feed = await parseFeed(fetched.body, fetched.finalUrl);
-    const newCount = await insertNormalizedItems(ownerId, sourceId, feed.entries, maximum);
+    const adapterConfig = parseObject(source.adapter_config_json);
+    let entries: NormalizedSourceItem[] = feed.entries;
+    if (adapterConfig.enrichment === "eu_publication") {
+      const existing = await getD1().prepare("SELECT guid FROM inbox_items WHERE owner_id = ? AND source_id = ? AND guid LIKE 'eu-file:%'")
+        .bind(ownerId, sourceId).all<Row>();
+      const existingParentKeys = new Set((existing.results ?? []).map((row) => String(row.guid).split(":")[1]).filter(Boolean));
+      entries = await expandEuPublicationEntries(entries, {
+        enrichment: "eu_publication",
+        maxDetailPagesPerRun: Number(adapterConfig.maxDetailPagesPerRun ?? 5),
+        maxAttachmentsPerItem: Number(adapterConfig.maxAttachmentsPerItem ?? 4),
+      } satisfies EuPublicationEnrichmentConfig, existingParentKeys);
+    }
+    const newCount = await insertNormalizedItems(ownerId, sourceId, entries, maximum);
+    const durationMs = Date.now() - started;
     await getD1().prepare("UPDATE sources SET source_type = ?, etag = ?, last_modified = ? WHERE id = ? AND owner_id = ?")
       .bind(feed.type, fetched.response.headers.get("etag"), fetched.response.headers.get("last-modified"), sourceId, ownerId).run();
     await recordSync(ownerId, sourceId, cadence, startedAt, "success", durationMs, newCount, null);
@@ -331,19 +355,21 @@ export async function reviewInboxItem(ownerId: string, actorEmail: string, id: s
   if (!item) throw new AppError(404, "INBOX_ITEM_NOT_FOUND", "待审核条目不存在。");
   if (item.review_status !== "pending") throw new AppError(409, "INBOX_ALREADY_REVIEWED", "这个条目已经审核过。");
   if (input.action === "reject" || input.action === "ignore") {
-    await db.prepare("UPDATE inbox_items SET review_status = ?, reviewed_at = ? WHERE id = ? AND owner_id = ? AND review_status = 'pending'")
+    const result = await db.prepare("UPDATE inbox_items SET review_status = ?, reviewed_at = ? WHERE id = ? AND owner_id = ? AND review_status = 'pending'")
       .bind(input.action === "reject" ? "rejected" : "ignored", now(), id, ownerId).run();
+    if ((result.meta.changes ?? 0) !== 1) throw new AppError(409, "INBOX_ALREADY_REVIEWED", "这个条目已经审核过。");
     return { recordId: null, evidenceId: null };
   }
   if (input.action !== "convert") throw new AppError(400, "INVALID_REVIEW_ACTION", "未知审核动作。");
   const stance = input.stance ?? "context";
   if (!STANCES.has(stance)) throw new AppError(400, "INVALID_STANCE", "证据立场必须是支持、反对或背景。");
-  const record = await createRecord(ownerId, actorEmail, {
-    kind: "signal",
-    status: "draft",
-    title: String(item.title),
-    summary: String(item.summary ?? ""),
-    payload: {
+  const timestamp = now();
+  const recordId = uuid();
+  const evidenceId = uuid();
+  const revisionId = uuid();
+  const title = String(item.title);
+  const summary = String(item.summary ?? "");
+  const payload = canonicalPayloadForRecord("signal", title, summary, {
       title: String(item.title),
       summary: String(item.summary ?? ""),
       quadrant: "",
@@ -353,22 +379,38 @@ export async function reviewInboxItem(ownerId: string, actorEmail: string, id: s
       confidence: 50,
       sourceName: String(item.source_name),
       sourceUrl: item.canonical_url ? String(item.canonical_url) : "",
-      observedAt: item.published_at ? String(item.published_at).slice(0, 10) : now().slice(0, 10),
+      observedAt: item.published_at ? String(item.published_at).slice(0, 10) : timestamp.slice(0, 10),
       tags: [],
-    },
-    changeReason: "由订阅待审核箱转为信号草稿",
   });
-  const timestamp = now();
-  const evidenceId = uuid();
-  await db.batch([
-    db.prepare("INSERT INTO evidence (id, owner_id, title, url, source_name, source_category, credibility, relevance, stance, note, published_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
-      .bind(evidenceId, ownerId, String(item.title), item.canonical_url ?? null, String(item.source_name), input.sourceCategory?.trim() || String(item.source_category), oneToFive(input.credibility ?? item.default_credibility, "可信度"), oneToFive(input.relevance ?? 3, "相关度"), stance, input.note?.trim() ?? "", item.published_at ?? null, timestamp, timestamp),
-    db.prepare("INSERT INTO evidence_links (evidence_id, record_id, relation, created_at) VALUES (?, ?, ?, ?)")
-      .bind(evidenceId, record.id, stance, timestamp),
+  const record: RecordDto = {
+    id: recordId,
+    kind: "signal",
+    status: "draft",
+    title,
+    summary,
+    payload,
+    revision: 1,
+    createdAt: timestamp,
+    updatedAt: timestamp,
+    archivedAt: null,
+    deletedAt: null,
+  };
+  const credibility = oneToFive(input.credibility ?? item.default_credibility, "可信度");
+  const relevance = oneToFive(input.relevance ?? 3, "相关度");
+  const results = await db.batch([
+    db.prepare("INSERT INTO records (id, owner_id, kind, status, title, summary, payload_json, revision, created_at, updated_at, archived_at, deleted_at) SELECT ?, ?, 'signal', 'draft', ?, ?, ?, 1, ?, ?, NULL, NULL FROM inbox_items WHERE id = ? AND owner_id = ? AND review_status = 'pending'")
+      .bind(recordId, ownerId, title, summary, JSON.stringify(payload), timestamp, timestamp, id, ownerId),
+    db.prepare("INSERT INTO record_revisions (id, record_id, owner_id, revision, snapshot_json, change_reason, changed_by, created_at) SELECT ?, ?, ?, 1, ?, '由订阅待审核箱转为信号草稿', ?, ? WHERE EXISTS (SELECT 1 FROM records WHERE id = ? AND owner_id = ?)")
+      .bind(revisionId, recordId, ownerId, JSON.stringify(record), actorEmail, timestamp, recordId, ownerId),
+    db.prepare("INSERT INTO evidence (id, owner_id, title, url, source_name, source_category, credibility, relevance, stance, note, published_at, created_at, updated_at) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM records WHERE id = ? AND owner_id = ?)")
+      .bind(evidenceId, ownerId, title, item.canonical_url ?? null, String(item.source_name), input.sourceCategory?.trim() || String(item.source_category), credibility, relevance, stance, input.note?.trim() ?? "", item.published_at ?? null, timestamp, timestamp, recordId, ownerId),
+    db.prepare("INSERT INTO evidence_links (evidence_id, record_id, relation, created_at) SELECT ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM evidence WHERE id = ? AND owner_id = ?) AND EXISTS (SELECT 1 FROM records WHERE id = ? AND owner_id = ?)")
+      .bind(evidenceId, recordId, stance, timestamp, evidenceId, ownerId, recordId, ownerId),
     db.prepare("UPDATE inbox_items SET review_status = 'converted', reviewed_at = ?, record_id = ? WHERE id = ? AND owner_id = ? AND review_status = 'pending'")
-      .bind(timestamp, record.id, id, ownerId),
+      .bind(timestamp, recordId, id, ownerId),
   ]);
-  return { recordId: record.id, evidenceId };
+  if ((results.at(-1)?.meta.changes ?? 0) !== 1) throw new AppError(409, "INBOX_ALREADY_REVIEWED", "这个条目已经审核过。");
+  return { recordId, evidenceId };
 }
 
 export async function createEvidence(ownerId: string, input: {
